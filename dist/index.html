@@ -333,7 +333,8 @@
     <h1><span>GBFR</span> Tool</h1>
     <div class="header-right">
       <span id="gameStatus" class="status-pill offline"><span class="dot"></span><span id="statusText">未连接</span></span>
-      <button class="icon-btn" onclick="refreshAll()" title="刷新">↻</button>
+      <button id="connectBtn" class="btn primary" style="padding:8px 18px;font-size:12.5px" onclick="doConnect()">连接</button>
+      <button id="disconnectBtn" class="btn" style="padding:8px 18px;font-size:12.5px" onclick="doDisconnect()" disabled>断开</button>
     </div>
   </div>
 
@@ -341,9 +342,12 @@
     <div class="tab active" onclick="switchTab(0)"><span class="tab-emoji">🏰</span> 队伍编辑器</div>
     <div class="tab" onclick="switchTab(1)"><span class="tab-emoji">✨</span> 露莉亚切换</div>
     <div class="tab" onclick="switchTab(2)"><span class="tab-emoji">📋</span> 角色速查</div>
+    <div class="tab" onclick="switchTab(3)"><span class="tab-emoji">🎯</span> 角色修改</div>
+    <div class="tab" onclick="switchTab(4)"><span class="tab-emoji">⚡</span> 战斗增强</div>
   </div>
 
   <div class="content">
+    <div id="connMsg" class="msg"></div>
     <!-- 队伍编辑器 -->
     <div class="panel active" id="panel0">
       <div class="notice">
@@ -378,6 +382,57 @@
       </div>
     </div>
 
+    <!-- 角色修改 (罗兰因子) -->
+    <div class="panel" id="panel4">
+      <div class="notice">
+        <b>角色修改（罗兰因子方法）</b> — 让因子界面显示任意角色（如罗兰），从而能打开装备/因子窗口。<br>
+        <b>步骤：</b>① 因子界面选中角色A → ② 扫描 → ③ 切到角色B → ④ 过滤 → ⑤ 切回A → ⑥ 过滤 → ⑦ 写入目标。
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="t-ico">🎯</span> 选中角色定位</div>
+        <div class="slot-row">
+          <div class="slot-current" style="width:auto"><b>角色A ID</b> <span style="color:var(--text-2);font-size:11px">当前选中的角色</span></div>
+          <select id="roleASelect" style="max-width:300px">
+            ${chars.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
+          </select>
+          <button class="btn primary" onclick="scanSelected()">① 扫描</button>
+        </div>
+        <div class="slot-row">
+          <div class="slot-current" style="width:auto"><b>过滤</b> <span style="color:var(--text-2);font-size:11px">切换角色后点过滤</span></div>
+          <button class="btn" onclick="filterSelected()">② 过滤</button>
+        </div>
+        <div class="slot-row">
+          <div class="slot-current" style="width:auto"><b>目标角色</b> <span style="color:var(--text-2);font-size:11px">改成谁</span></div>
+          <select id="targetSelect" style="max-width:300px">
+            ${chars.map(c => `<option value="${c.id}">${c.name}${c.note ? ' - ' + c.note : ''}</option>`).join('')}
+          </select>
+          <button class="btn green" onclick="writeSelected()">③ 写入</button>
+        </div>
+        <div id="selStatus" class="msg info">候选: 0</div>
+        <div id="selMsg" class="msg"></div>
+      </div>
+    </div>
+
+    <!-- 战斗增强 -->
+    <div class="panel" id="panel4">
+      <div class="notice">
+        <b>战斗增强</b> — 通过内存 patch 实现，可随时开关。<br>
+        无CD: 技能无冷却 · 无限血: 受到伤害清零（自己打怪正常）。
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="t-ico">⚡</span> 开关</div>
+        <div class="slot-row">
+          <div class="slot-current" style="width:auto"><b>无CD</b> <span style="color:var(--text-2);font-size:11px">技能无冷却</span></div>
+          <button id="noCdBtn" class="btn" onclick="toggleNoCd()" style="margin-left:auto">关</button>
+        </div>
+        <div class="slot-row">
+          <div class="slot-current" style="width:auto"><b>无限血</b> <span style="color:var(--text-2);font-size:11px">受到伤害清零</span></div>
+          <button id="hpBtn" class="btn" onclick="toggleHp()" style="margin-left:auto">关</button>
+        </div>
+        <div id="cheatMsg" class="msg"></div>
+      </div>
+    </div>
+
     <!-- 角色速查 -->
     <div class="panel" id="panel2">
       <div class="table-wrap">
@@ -400,8 +455,66 @@
       try {
         chars = await invoke('get_chars');
         renderCharTable();
-        await refreshAll();
+        // 不再自动连接, 显示状态
+        await checkConn();
       } catch (e) { console.error(e); }
+    }
+
+    async function checkConn() {
+      try {
+        const st = await invoke('conn_state');
+        updateConnUI(st.connected);
+      } catch (e) { console.error(e); }
+    }
+
+    async function doConnect() {
+      const btn = document.getElementById('connectBtn');
+      btn.disabled = true;
+      btn.textContent = '连接中...';
+      try {
+        const st = await invoke('connect');
+        updateConnUI(true);
+        await refreshAll();
+        showMsg('connMsg', '✓ 已连接游戏', 'ok');
+      } catch (e) {
+        updateConnUI(false);
+        showMsg('connMsg', '✗ 连接失败: ' + e, 'err');
+      }
+      btn.disabled = false;
+      btn.textContent = '连接';
+    }
+
+    async function doDisconnect() {
+      try {
+        await invoke('disconnect');
+        updateConnUI(false);
+        showMsg('connMsg', '已断开连接', 'info');
+      } catch (e) { console.error(e); }
+    }
+
+    function updateConnUI(connected) {
+      const pill = document.getElementById('gameStatus');
+      const txt = document.getElementById('statusText');
+      const connBtn = document.getElementById('connectBtn');
+      const discBtn = document.getElementById('disconnectBtn');
+      if (connected) {
+        pill.className = 'status-pill online';
+        txt.textContent = '已连接';
+        connBtn.disabled = true;
+        discBtn.disabled = false;
+      } else {
+        pill.className = 'status-pill offline';
+        txt.textContent = '未连接';
+        connBtn.disabled = false;
+        discBtn.disabled = true;
+      }
+    }
+
+    function showMsg(id, text, type) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.className = 'msg ' + type;
+      el.textContent = text;
     }
 
     function switchTab(idx) {
@@ -409,9 +522,79 @@
       document.querySelectorAll('.panel').forEach((p, i) => p.classList.toggle('active', i === idx));
     }
 
+    // ===== 角色修改 (罗兰因子) =====
+    let selCandidates = [];
+    let selRoleA = 0;
+
+    async function scanSelected() {
+      const msg = document.getElementById('selMsg');
+      msg.className = 'msg';
+      const roleA = parseInt(document.getElementById('roleASelect').value);
+      selRoleA = roleA;
+      try {
+        msg.textContent = '扫描中... (可能需几秒)';
+        msg.className = 'msg info';
+        selCandidates = await invoke('scan_selected', { roleId: roleA });
+        const st = document.getElementById('selStatus');
+        st.textContent = '候选: ' + selCandidates.length + ' (切到角色B后点过滤)';
+        msg.textContent = '✓ 扫描完成: ' + selCandidates.length + ' 个地址. 请切换到【角色B】后点过滤';
+        msg.className = 'msg ok';
+      } catch (e) {
+        msg.textContent = '✗ ' + e;
+        msg.className = 'msg err';
+      }
+    }
+
+    async function filterSelected() {
+      const msg = document.getElementById('selMsg');
+      msg.className = 'msg';
+      if (selCandidates.length === 0) {
+        msg.textContent = '请先扫描';
+        msg.className = 'msg err';
+        return;
+      }
+      try {
+        // 过滤: 保留值 = 角色A 的地址 (切走B后, 选中指针会变成B, 所以A的值消失)
+        const before = selCandidates.length;
+        selCandidates = await invoke('filter_selected', { addrs: selCandidates, roleId: selRoleA });
+        const st = document.getElementById('selStatus');
+        st.textContent = '候选: ' + selCandidates.length;
+        if (selCandidates.length > 20) {
+          msg.textContent = `过滤后 ${selCandidates.length} 个 (从 ${before}). 再切回角色A, 再过滤一次`;
+          msg.className = 'msg info';
+        } else {
+          msg.textContent = `✓ 候选 ${selCandidates.length} 个. 切回角色A确认, 或直接写入目标角色`;
+          msg.className = 'msg ok';
+        }
+      } catch (e) {
+        msg.textContent = '✗ ' + e;
+        msg.className = 'msg err';
+      }
+    }
+
+    async function writeSelected() {
+      const msg = document.getElementById('selMsg');
+      msg.className = 'msg';
+      if (selCandidates.length === 0) {
+        msg.textContent = '请先扫描/过滤';
+        msg.className = 'msg err';
+        return;
+      }
+      const target = parseInt(document.getElementById('targetSelect').value);
+      try {
+        const n = await invoke('write_selected', { addrs: selCandidates, roleId: target });
+        msg.textContent = `✓ 已写入 ${n} 个地址 = 目标角色. 回因子界面查看!`;
+        msg.className = 'msg ok';
+      } catch (e) {
+        msg.textContent = '✗ ' + e;
+        msg.className = 'msg err';
+      }
+    }
+
     async function refreshAll() {
       try {
         const st = await invoke('get_game_status');
+        updateConnUI(st.running);
         const pill = document.getElementById('gameStatus');
         const txt = document.getElementById('statusText');
         if (st.running) {
@@ -540,6 +723,44 @@
           <td>${badge} <span style="color:var(--text-2);font-size:12px">${escapeHtml(c.note || '')}</span></td>
         </tr>`;
       }).join('');
+    }
+
+    let noCd = false, infHp = false;
+
+    async function toggleNoCd() {
+      noCd = !noCd;
+      const btn = document.getElementById('noCdBtn');
+      const msg = document.getElementById('cheatMsg');
+      msg.className = 'msg';
+      try {
+        await invoke('set_no_cd', { enable: noCd });
+        btn.textContent = noCd ? '开' : '关';
+        btn.className = noCd ? 'btn green' : 'btn';
+        msg.className = 'msg ok';
+        msg.textContent = '✓ 无CD ' + (noCd ? '已开启' : '已关闭');
+      } catch (e) {
+        noCd = !noCd;
+        msg.className = 'msg err';
+        msg.textContent = '✗ ' + e;
+      }
+    }
+
+    async function toggleHp() {
+      infHp = !infHp;
+      const btn = document.getElementById('hpBtn');
+      const msg = document.getElementById('cheatMsg');
+      msg.className = 'msg';
+      try {
+        await invoke('set_infinite_hp', { enable: infHp });
+        btn.textContent = infHp ? '开' : '关';
+        btn.className = infHp ? 'btn green' : 'btn';
+        msg.className = 'msg ok';
+        msg.textContent = '✓ 无限血 ' + (infHp ? '已开启' : '已关闭');
+      } catch (e) {
+        infHp = !infHp;
+        msg.className = 'msg err';
+        msg.textContent = '✗ ' + e;
+      }
     }
 
     function hex(v) {
