@@ -12,7 +12,13 @@ use windows_sys::Win32::System::Threading::{
 };
 
 pub struct Process {
-    handle: HANDLE,
+    pub handle: HANDLE,
+}
+
+impl Process {
+    pub fn handle(&self) -> HANDLE {
+        self.handle
+    }
 }
 
 unsafe impl Send for Process {}
