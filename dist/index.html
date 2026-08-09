@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GBFR Tool</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+    :root {
+      --bg-0: #0b0e14;
+      --bg-1: #11151f;
+      --bg-2: #1a2029;
+      --bg-3: #242b38;
+      --border: #2c3542;
+      --text-0: #f0f3f8;
+      --text-1: #b8c0cc;
+      --text-2: #7a8494;
+      --accent: #4f8df9;
+      --accent-2: #7c5cff;
+      --accent-3: #2dd4bf;
+      --green: #34d399;
+      --red: #f87171;
+      --amber: #fbbf24;
+      --radius: 14px;
+      --shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', 'Microsoft YaHei', sans-serif;
+      background: var(--bg-0);
+      color: var(--text-0);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(800px 400px at 80% -10%, rgba(79,141,249,0.15), transparent),
+        radial-gradient(600px 300px at 0% 110%, rgba(124,92,255,0.12), transparent),
+        radial-gradient(400px 200px at 50% 50%, rgba(45,212,191,0.05), transparent);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(13,16,24,0.85);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .logo {
+      width: 36px; height: 36px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 16px; color: white;
+      box-shadow: 0 4px 16px rgba(79,141,249,0.4);
+    }
+    .header h1 { font-size: 17px; font-weight: 700; letter-spacing: 0.3px; }
+    .header h1 span { background: linear-gradient(90deg, var(--accent), var(--accent-3)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+
+    .status-pill {
+      padding: 6px 16px;
+      border-radius: 100px;
+      font-size: 12px;
+      font-weight: 600;
+      display: flex; align-items: center; gap: 7px;
+    }
+    .status-pill .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    .status-pill.online { background: rgba(52,211,153,0.12); color: var(--green); border: 1px solid rgba(52,211,153,0.3); }
+    .status-pill.online .dot { background: var(--green); }
+    .status-pill.offline { background: rgba(248,113,113,0.12); color: var(--red); border: 1px solid rgba(248,113,113,0.3); }
+    .status-pill.offline .dot { background: var(--red); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    .icon-btn {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      color: var(--text-1);
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px;
+      transition: all 0.2s;
+    }
+    .icon-btn:hover { background: var(--bg-3); color: white; transform: translateY(-1px); }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      padding: 0 28px;
+      background: var(--bg-1);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 65px;
+      z-index: 90;
+    }
+    .tab {
+      padding: 14px 20px;
+      cursor: pointer;
+      color: var(--text-2);
+      font-size: 13.5px;
+      font-weight: 600;
+      position: relative;
+      transition: color 0.2s;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .tab:hover { color: var(--text-0); }
+    .tab.active { color: white; }
+    .tab.active::after {
+      content: '';
+      position: absolute;
+      bottom: -1px; left: 14px; right: 14px;
+      height: 3px;
+      border-radius: 3px 3px 0 0;
+      background: linear-gradient(90deg, var(--accent), var(--accent-3));
+    }
+    .tab-emoji { font-size: 16px; }
+
+    .content {
+      position: relative;
+      z-index: 1;
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+    .panel { display: none; animation: fadeIn 0.25s ease; }
+    .panel.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+    .notice {
+      background: linear-gradient(135deg, rgba(79,141,249,0.08), rgba(124,92,255,0.06));
+      border: 1px solid rgba(79,141,249,0.2);
+      border-radius: var(--radius);
+      padding: 16px 20px;
+      font-size: 13px;
+      line-height: 1.7;
+      color: var(--text-1);
+      margin-bottom: 24px;
+      position: relative;
+      overflow: hidden;
+    }
+    .notice::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 3px;
+      background: linear-gradient(180deg, var(--accent), var(--accent-3));
+    }
+    .notice b { color: var(--text-0); }
+
+    .card {
+      background: linear-gradient(160deg, var(--bg-2), var(--bg-1));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      margin-bottom: 20px;
+      box-shadow: var(--shadow);
+      transition: border-color 0.3s;
+    }
+    .card:hover { border-color: #3a4556; }
+    .card-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 18px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .card-title .t-ico {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      background: rgba(79,141,249,0.15);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px;
+    }
+
+    .slot-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      transition: all 0.2s;
+      margin-bottom: 8px;
+      background: rgba(255,255,255,0.02);
+    }
+    .slot-row:hover { background: rgba(255,255,255,0.04); border-color: var(--border); }
+    .slot-index {
+      width: 34px; height: 34px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, var(--bg-3), var(--bg-2));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 13px;
+      color: var(--text-1);
+      flex-shrink: 0;
+    }
+    .slot-current {
+      font-size: 13px;
+      color: var(--text-1);
+      width: 210px;
+      flex-shrink: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .slot-current .cur-id { color: var(--text-2); font-size: 11px; font-family: monospace; margin-left: 6px; }
+
+    select {
+      background: var(--bg-2);
+      color: var(--text-0);
+      border: 1px solid var(--border);
+      padding: 9px 14px;
+      border-radius: 9px;
+      font-size: 13px;
+      flex: 1;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%237a8494' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 32px;
+    }
+    select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,141,249,0.15); }
+    select option { background: var(--bg-2); }
+
+    .btn-row { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-3);
+      color: var(--text-0);
+      border: 1px solid var(--border);
+      padding: 11px 22px;
+      border-radius: 10px;
+      font-size: 13.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
+    .btn:active { transform: translateY(0); }
+    .btn.primary {
+      background: linear-gradient(135deg, var(--accent), #3d6fe0);
+      border: none;
+      color: white;
+      box-shadow: 0 4px 16px rgba(79,141,249,0.35);
+    }
+    .btn.primary:hover { box-shadow: 0 6px 24px rgba(79,141,249,0.5); }
+    .btn.green {
+      background: linear-gradient(135deg, #34d399, #10b981);
+      border: none; color: white;
+      box-shadow: 0 4px 16px rgba(52,211,153,0.3);
+    }
+    .btn.red {
+      background: linear-gradient(135deg, #f87171, #dc2626);
+      border: none; color: white;
+      box-shadow: 0 4px 16px rgba(248,113,113,0.3);
+    }
+    .btn.ghost { background: transparent; color: var(--text-1); }
+    .btn.ghost:hover { background: var(--bg-2); color: white; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .msg {
+      margin-top: 16px;
+      padding: 14px 18px;
+      border-radius: 10px;
+      font-size: 13px;
+      line-height: 1.7;
+      display: none;
+      white-space: pre-line;
+    }
+    .msg.ok { display: block; background: rgba(52,211,153,0.08); color: var(--green); border: 1px solid rgba(52,211,153,0.25); }
+    .msg.err { display: block; background: rgba(248,113,113,0.08); color: var(--red); border: 1px solid rgba(248,113,113,0.25); }
+    .msg.info { display: block; background: rgba(79,141,249,0.08); color: var(--accent); border: 1px solid rgba(79,141,249,0.25); }
+    .msg.warn { display: block; background: rgba(251,191,36,0.08); color: var(--amber); border: 1px solid rgba(251,191,36,0.25); }
+
+    .table-wrap {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 11px 18px; text-align: left; }
+    th {
+      color: var(--text-2);
+      font-weight: 600;
+      font-size: 11.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      background: rgba(0,0,0,0.2);
+      border-bottom: 1px solid var(--border);
+    }
+    td { border-bottom: 1px solid rgba(44,53,66,0.5); color: var(--text-1); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(79,141,249,0.04); }
+    .id-mono { font-family: 'Cascadia Code', monospace; color: var(--accent); font-size: 12px; }
+    .name-hl { color: white; font-weight: 700; }
+    .name-warn { color: var(--amber); font-weight: 600; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-size: 10.5px;
+      font-weight: 600;
+    }
+    .badge.full { background: rgba(52,211,153,0.15); color: var(--green); }
+    .badge.part { background: rgba(251,191,36,0.15); color: var(--amber); }
+    .badge.none { background: rgba(248,113,113,0.15); color: var(--red); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">G</div>
+    <h1><span>GBFR</span> Tool</h1>
+    <div class="header-right">
+      <span id="gameStatus" class="status-pill offline"><span class="dot"></span><span id="statusText">未连接</span></span>
+      <button class="icon-btn" onclick="refreshAll()" title="刷新">↻</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab(0)"><span class="tab-emoji">🏰</span> 队伍编辑器</div>
+    <div class="tab" onclick="switchTab(1)"><span class="tab-emoji">✨</span> 露莉亚切换</div>
+    <div class="tab" onclick="switchTab(2)"><span class="tab-emoji">📋</span> 角色速查</div>
+  </div>
+
+  <div class="content">
+    <!-- 队伍编辑器 -->
+    <div class="panel active" id="panel0">
+      <div class="notice">
+        <b>使用说明</b> — 通过内存直接修改队伍槽位（<code>exe+0x701C420</code>）。<br>
+        <b>罗兰</b> 全功能可用 · <b>露莉亚</b> 战斗可用（菜单会闪退）· 修改后进游戏查看队伍界面生效。
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="t-ico">⚔️</span> 队伍槽位</div>
+        <div id="slotList"></div>
+        <div class="btn-row">
+          <button class="btn primary" onclick="applyAllSlots()">✓ 应用全部修改</button>
+          <button class="btn ghost" onclick="refreshSlots()">↻ 重新读取</button>
+        </div>
+        <div id="slotMsg" class="msg"></div>
+      </div>
+    </div>
+
+    <!-- 露莉亚切换 -->
+    <div class="panel" id="panel1">
+      <div class="notice">
+        <b>露莉亚</b> 战斗 / 回城 / 城镇移动 <b>完全正常</b>，但打开菜单会闪退（她的数据是敌人模型）。<br>
+        使用流程：<b>切换露莉亚</b> → 进战斗 → 打完回城 → <b>开菜单前先恢复</b>。
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="t-ico">✨</span> 切换操作</div>
+        <div id="lyriaStatus" class="msg info"></div>
+        <div class="btn-row">
+          <button class="btn green" onclick="lyriaOn()">⚔ 切换露莉亚 <small style="opacity:.7">(进战斗)</small></button>
+          <button class="btn red" onclick="lyriaOff()">🛡 恢复正常角色 <small style="opacity:.7">(开菜单)</small></button>
+        </div>
+        <div id="lyriaMsg" class="msg"></div>
+      </div>
+    </div>
+
+    <!-- 角色速查 -->
+    <div class="panel" id="panel2">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>角色</th><th>ID (Hex)</th><th>ID (十进制)</th><th>状态</th></tr>
+          </thead>
+          <tbody id="charTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__;
+    let chars = [];
+    let currentSlots = [];
+
+    async function init() {
+      try {
+        chars = await invoke('get_chars');
+        renderCharTable();
+        await refreshAll();
+      } catch (e) { console.error(e); }
+    }
+
+    function switchTab(idx) {
+      document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === idx));
+      document.querySelectorAll('.panel').forEach((p, i) => p.classList.toggle('active', i === idx));
+    }
+
+    async function refreshAll() {
+      try {
+        const st = await invoke('get_game_status');
+        const pill = document.getElementById('gameStatus');
+        const txt = document.getElementById('statusText');
+        if (st.running) {
+          pill.className = 'status-pill online';
+          txt.textContent = '已连接';
+        } else {
+          pill.className = 'status-pill offline';
+          txt.textContent = '未连接 · 游戏未运行';
+        }
+        currentSlots = st.slots || [];
+        renderSlots();
+        renderLyriaStatus(st);
+      } catch (e) { console.error(e); }
+    }
+
+    function renderSlots() {
+      const list = document.getElementById('slotList');
+      let html = '';
+      currentSlots.forEach((slot, i) => {
+        const note = getCharNote(slot.id);
+        html += `<div class="slot-row">
+          <div class="slot-index">${slot.index + 1}</div>
+          <div class="slot-current">
+            <div>${escapeHtml(slot.name)}</div>
+            <span class="cur-id">${hex(slot.id)}</span>
+            ${note ? `<span style="color:var(--accent);font-size:11px"> ${note}</span>` : ''}
+          </div>
+          <select id="slotSelect_${i}" data-index="${i}">
+            ${chars.map(c => `<option value="${c.id}" ${c.id === slot.id ? 'selected' : ''}>${c.name}${c.note ? ' · ' + c.note : ''}</option>`).join('')}
+          </select>
+        </div>`;
+      });
+      list.innerHTML = html;
+    }
+    function getCharNote(id) {
+      const c = chars.find(x => x.id === id);
+      return c && c.note && !c.note.includes('★') ? c.note : '';
+    }
+
+    async function applyAllSlots() {
+      const msg = document.getElementById('slotMsg');
+      msg.className = 'msg';
+      try {
+        let results = [];
+        currentSlots.forEach((_, i) => {
+          const sel = document.getElementById(`slotSelect_${i}`);
+          if (sel) results.push({ slot: i, id: parseInt(sel.value) });
+        });
+        for (const r of results) {
+          await invoke('set_slot', { slot: r.slot, id: r.id });
+        }
+        msg.className = 'msg ok';
+        msg.textContent = `✓ 已写入 ${results.length} 个槽位`;
+        await refreshSlots();
+      } catch (e) {
+        msg.className = 'msg err';
+        msg.textContent = '✗ ' + e;
+      }
+    }
+
+    async function refreshSlots() {
+      const st = await invoke('get_game_status');
+      currentSlots = st.slots || [];
+      renderSlots();
+    }
+
+    function renderLyriaStatus(st) {
+      const el = document.getElementById('lyriaStatus');
+      if (!st.running) {
+        el.textContent = '游戏未运行';
+        el.className = 'msg err';
+        return;
+      }
+      const slot0 = st.slots && st.slots[0];
+      if (slot0) {
+        if (slot0.id === 0x3529CC90) {
+          el.textContent = '⚠ 当前状态: 露莉亚在队伍中 — 不要打开菜单!';
+          el.className = 'msg warn';
+        } else {
+          el.textContent = `✓ 当前槽位1: ${slot0.name} (${hex(slot0.id)}) — 可以安全打开菜单`;
+          el.className = 'msg ok';
+        }
+      }
+    }
+
+    async function lyriaOn() {
+      const msg = document.getElementById('lyriaMsg');
+      msg.className = 'msg';
+      try {
+        const r = await invoke('lyria_switch', { mode: 'on' });
+        msg.className = 'msg ok';
+        msg.textContent = '✓ ' + r;
+        await refreshAll();
+      } catch (e) {
+        msg.className = 'msg err';
+        msg.textContent = '✗ ' + e;
+      }
+    }
+
+    async function lyriaOff() {
+      const msg = document.getElementById('lyriaMsg');
+      msg.className = 'msg';
+      try {
+        const r = await invoke('lyria_switch', { mode: 'off' });
+        msg.className = 'msg ok';
+        msg.textContent = '✓ ' + r;
+        await refreshAll();
+      } catch (e) {
+        msg.className = 'msg err';
+        msg.textContent = '✗ ' + e;
+      }
+    }
+
+    function renderCharTable() {
+      const tbody = document.getElementById('charTable');
+      tbody.innerHTML = chars.map(c => {
+        let badge = '';
+        if (c.note.includes('全功能')) badge = '<span class="badge full">可玩</span>';
+        else if (c.note.includes('战斗可用')) badge = '<span class="badge part">战斗</span>';
+        else if (c.note.includes('非战斗')) badge = '<span class="badge none">不可用</span>';
+        const hl = c.name === '罗兰' ? 'name-hl' : (c.name === '露莉亚' ? 'name-warn' : '');
+        return `<tr>
+          <td class="${hl}">${escapeHtml(c.name)}</td>
+          <td class="id-mono">${hex(c.id)}</td>
+          <td>${c.id}</td>
+          <td>${badge} <span style="color:var(--text-2);font-size:12px">${escapeHtml(c.note || '')}</span></td>
+        </tr>`;
+      }).join('');
+    }
+
+    function hex(v) {
+      return '0x' + (v >>> 0).toString(16).toUpperCase().padStart(8, '0');
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    init();
+  </script>
+</body>
+</html>
