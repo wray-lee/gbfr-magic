@@ -1,0 +1,14 @@
+# Rust / Tauri
+/target
+**/target/
+
+# Node
+node_modules/
+
+# 构建产物
+*.exe
+*.msi
+
+# 临时
+*.bak
+*.tmp
