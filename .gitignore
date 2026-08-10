@@ -12,3 +12,6 @@ node_modules/
 # 临时
 *.bak
 *.tmp
+
+# 逆向工作日志 (不上传远端)
+docs/

@@ -350,6 +350,7 @@
     <div class="tab" onclick="switchTab(2)"><span class="tab-emoji">📋</span> <span data-i18n="tabChars">角色速查</span></div>
     <div class="tab" onclick="switchTab(3)"><span class="tab-emoji">🎯</span> <span data-i18n="tabCharMod">角色修改</span></div>
     <div class="tab" onclick="switchTab(4)"><span class="tab-emoji">⚡</span> <span data-i18n="tabBattle">战斗增强</span></div>
+    <div class="tab" onclick="switchTab(5)"><span class="tab-emoji">🌐</span> <span data-i18n="tabNet">联机</span></div>
   </div>
 
   <div class="content">
@@ -437,6 +438,46 @@
       </div>
     </div>
 
+    <!-- 联机 -->
+    <div class="panel" id="panel5">
+      <div class="notice">
+        <b data-i18n="netNotice1">联机功能</b><span data-i18n="netNotice2"> — 扫描游戏内存中的房间列表（服务器下发数据）。</span><br>
+        <span data-i18n="netNotice3">房间密码为明文存储，上锁房间可直接看到密码。平台: 1=Steam 3=Xbox 5=PlayStation。</span>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="t-ico">🌐</span> <span data-i18n="netRooms">房间列表</span></div>
+        <div class="slot-row">
+          <button class="btn primary" onclick="scanRooms()"><span data-i18n="netScan">🔍 扫描房间</span></button>
+          <span id="roomCount" class="msg info" style="margin:0"></span>
+        </div>
+        <div id="roomMsg" class="msg"></div>
+        <div class="table-wrap" style="margin-top:16px">
+          <table>
+            <thead>
+              <tr><th data-i18n="netColLeader">房主</th><th data-i18n="netColPlatform">平台</th><th data-i18n="netColId">账号 ID</th><th data-i18n="netColPwd">密码</th><th data-i18n="netColLocked">上锁</th></tr>
+            </thead>
+            <tbody id="roomTable"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="t-ico">👥</span> <span data-i18n="netMembers">当前房间成员</span></div>
+        <div class="slot-row">
+          <button class="btn primary" onclick="scanMembers()"><span data-i18n="netScanMembers">👥 扫描成员</span></button>
+          <span id="memberCount" class="msg info" style="margin:0"></span>
+        </div>
+        <div id="memberMsg" class="msg"></div>
+        <div class="table-wrap" style="margin-top:16px">
+          <table>
+            <thead>
+              <tr><th data-i18n="netColGameName">游戏名</th><th data-i18n="netColMemberName">名字</th><th data-i18n="netColPlatform">平台</th><th data-i18n="netColId">账号 ID</th><th data-i18n="netColGameId">游戏内 ID</th></tr>
+            </thead>
+            <tbody id="memberTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- 角色速查 -->
     <div class="panel" id="panel2">
       <div class="table-wrap">
@@ -462,7 +503,10 @@
       zh: {
         statusConnected: '已连接', statusOffline: '未连接 · 游戏未运行', connecting: '连接中...',
         connect: '连接', disconnect: '断开',
-        tabParty: '队伍编辑器', tabLyria: '露莉亚切换', tabChars: '角色速查', tabCharMod: '角色修改', tabBattle: '战斗增强',
+        tabParty: '队伍编辑器', tabLyria: '露莉亚切换', tabChars: '角色速查', tabCharMod: '角色修改', tabBattle: '战斗增强', tabNet: '联机',
+        netNotice1: '联机功能', netNotice2: ' — 扫描游戏内存中的房间列表（服务器下发数据）。', netNotice3: '房间密码为明文存储，上锁房间可直接看到密码。平台: 1=Steam 3=Xbox 5=PlayStation。',
+        netRooms: '房间列表', netScan: '🔍 扫描房间', netColLeader: '房主', netColPlatform: '平台', netColId: '账号 ID', netColPwd: '密码', netColLocked: '上锁',
+        netMembers: '当前房间成员', netScanMembers: '👥 扫描成员', netColMemberName: '名字', netColGameId: '游戏内 ID', netColGameName: '游戏名',
         partyNotice1: '使用说明', partyNotice2: ' — 通过内存直接修改队伍槽位', partyNotice3: ' 全功能可用 · ', partyNotice4: ' 战斗可用（菜单会闪退）· 修改后进游戏查看队伍界面生效。',
         roland: '罗兰', lyria: '露莉亚',
         partySlots: '队伍槽位', applyAll: '✓ 应用全部修改', reload: '↻ 重新读取',
@@ -478,7 +522,10 @@
       ja: {
         statusConnected: '接続済み', statusOffline: '未接続 · ゲーム未起動', connecting: '接続中...',
         connect: '接続', disconnect: '切断',
-        tabParty: 'パーティ編集', tabLyria: 'ルリア切替', tabChars: 'キャラ一覧', tabCharMod: 'キャラ変更', tabBattle: '戦闘強化',
+        tabParty: 'パーティ編集', tabLyria: 'ルリア切替', tabChars: 'キャラ一覧', tabCharMod: 'キャラ変更', tabBattle: '戦闘強化', tabNet: 'オンライン',
+        netNotice1: 'オンライン機能', netNotice2: ' — ゲームメモリのルーム一覧をスキャン（サーバー配信データ）。', netNotice3: 'ルームパスワードは平文保存、鍵付きルームのパスワードも直接表示。プラットフォーム: 1=Steam 3=Xbox 5=PlayStation。',
+        netRooms: 'ルーム一覧', netScan: '🔍 スキャン', netColLeader: 'ホスト', netColPlatform: 'プラットフォーム', netColId: 'アカウントID', netColPwd: 'パスワード', netColLocked: '鍵付き',
+        netMembers: '現在のルームメンバー', netScanMembers: '👥 メンバー取得', netColMemberName: '名前', netColGameId: 'ゲーム内ID', netColGameName: 'ゲーム名',
         partyNotice1: '説明', partyNotice2: ' — メモリでパーティスロットを変更', partyNotice3: ' 全機能使用可 · ', partyNotice4: ' 戦闘使用可（メニューでクラッシュ）· 変更後ゲームで確認。',
         roland: 'ロラン', lyria: 'ルリア',
         partySlots: 'パーティスロット', applyAll: '✓ 全て適用', reload: '↻ 再読込',
@@ -494,7 +541,10 @@
       en: {
         statusConnected: 'Connected', statusOffline: 'Disconnected · Game not running', connecting: 'Connecting...',
         connect: 'Connect', disconnect: 'Disconnect',
-        tabParty: 'Party Editor', tabLyria: 'Lyria Switch', tabChars: 'Character List', tabCharMod: 'Char Mod', tabBattle: 'Battle Cheats',
+        tabParty: 'Party Editor', tabLyria: 'Lyria Switch', tabChars: 'Character List', tabCharMod: 'Char Mod', tabBattle: 'Battle Cheats', tabNet: 'Online',
+        netNotice1: 'Online', netNotice2: ' — scan room list from game memory (server data).', netNotice3: 'Room passwords stored in plaintext; locked rooms show password directly. Platform: 1=Steam 3=Xbox 5=PlayStation.',
+        netRooms: 'Room List', netScan: '🔍 Scan Rooms', netColLeader: 'Host', netColPlatform: 'Platform', netColId: 'Account ID', netColPwd: 'Password', netColLocked: 'Locked',
+        netMembers: 'Current Room Members', netScanMembers: '👥 Scan Members', netColMemberName: 'Name', netColGameId: 'Game ID', netColGameName: 'Game Name',
         partyNotice1: 'Info', partyNotice2: ' — Modify party slots via memory', partyNotice3: ' fully playable · ', partyNotice4: ' playable in battle (menu crashes) · check in-game after changing.',
         roland: 'Roland', lyria: 'Lyria',
         partySlots: 'Party Slots', applyAll: '✓ Apply All', reload: '↻ Reload',
@@ -621,6 +671,65 @@
       document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
       const target = document.getElementById('panel' + idx);
       if (target) target.classList.add('active');
+    }
+
+    // ===== 联机 =====
+    async function scanRooms() {
+      const msg = document.getElementById('roomMsg');
+      msg.className = 'msg';
+      msg.textContent = '扫描中... (约 5-10 秒)';
+      msg.className = 'msg info';
+      const cnt = document.getElementById('roomCount');
+      cnt.textContent = '';
+      try {
+        const rooms = await invoke('scan_rooms');
+        const tbody = document.getElementById('roomTable');
+        tbody.innerHTML = rooms.map(r => {
+          const plat = {1:'Steam', 3:'Xbox', 5:'PS'}[r.platform] || r.platform;
+          return `<tr>
+            <td>${escapeHtml(r.leader_name)}</td>
+            <td>${plat}</td>
+            <td style="font-size:11px;color:var(--text-2)">${escapeHtml(r.account_id)}</td>
+            <td>${escapeHtml(r.password)}</td>
+            <td>${r.locked ? '🔒' : ''}</td>
+          </tr>`;
+        }).join('');
+        cnt.textContent = rooms.length + ' 个房间';
+        msg.textContent = '✓ 扫描完成: ' + rooms.length + ' 个房间';
+        msg.className = 'msg ok';
+      } catch (e) {
+        msg.textContent = '错误: ' + e;
+        msg.className = 'msg err';
+      }
+    }
+
+    async function scanMembers() {
+      const msg = document.getElementById('memberMsg');
+      msg.className = 'msg info';
+      msg.textContent = '扫描中...';
+      const cnt = document.getElementById('memberCount');
+      cnt.textContent = '';
+      try {
+        const members = await invoke('scan_members');
+        const tbody = document.getElementById('memberTable');
+        tbody.innerHTML = members.map(m => `<tr>
+          <td>${escapeHtml(m.game_name)}</td>
+          <td>${escapeHtml(m.name)}</td>
+          <td>${escapeHtml(m.platform)}</td>
+          <td style="font-size:11px;color:var(--text-2)">${escapeHtml(m.account_id)}</td>
+          <td style="font-size:11px;color:var(--text-2)">${escapeHtml(m.game_id)}</td>
+        </tr>`).join('');
+        cnt.textContent = members.length + ' 人';
+        msg.textContent = '✓ ' + members.length + ' 名成员';
+        msg.className = 'msg ok';
+      } catch (e) {
+        msg.textContent = '错误: ' + e;
+        msg.className = 'msg err';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
     // ===== 角色修改 (罗兰因子) =====

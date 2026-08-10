@@ -4,6 +4,7 @@
 mod chars;
 mod game;
 mod memory;
+mod net;
 
 // Tauri 命令
 #[tauri::command]
@@ -84,6 +85,22 @@ fn conn_state() -> game::ConnState {
     game::conn_state()
 }
 
+// 联机: 扫描房间列表
+#[tauri::command]
+async fn scan_rooms() -> Result<Vec<net::RoomInfo>, String> {
+    tauri::async_runtime::spawn_blocking(net::scan_rooms)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+// 联机: 扫描当前房间成员
+#[tauri::command]
+async fn scan_members() -> Result<Vec<net::MemberInfo>, String> {
+    tauri::async_runtime::spawn_blocking(net::scan_members)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -98,6 +115,8 @@ fn main() {
             write_selected,
             lock_selected,
             read_u32_at,
+            scan_rooms,
+            scan_members,
             connect,
             disconnect,
             conn_state
