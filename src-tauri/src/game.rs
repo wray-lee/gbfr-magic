@@ -14,6 +14,8 @@ pub const PARTY_MAX_SLOTS: u64 = 5;
 
 // 特殊角色
 pub const LYRIA: u32 = 0x3529CC90;
+// 合法可操纵角色 (恢复队伍时用, 避免不可操纵角色存档坏档)
+pub const KATALINA: u32 = 0x18E2F9F9;
 
 #[derive(Serialize, Clone)]
 pub struct GameStatus {
@@ -100,15 +102,14 @@ pub fn lyria_switch(mode: &str) -> Result<String, String> {
                 Ok(format!("已切换: {:08X} -> 露莉亚({:08X})\n现在可以进战斗, 但不要开菜单!", cur, LYRIA))
             }
         }
-        "off" => {
-            // 从隐藏槽恢复
-            let saved = proc.read_u32(party_ptr + 4 * PARTY_SLOT_SIZE).unwrap_or(0);
+                "off" => {
+            // 恢复为合法角色 (卡塔莉娜), 避免不可操纵角色存档坏档
             let cur = proc.read_u32(slot0).unwrap_or(0);
-            if saved != 0 && saved != LYRIA {
-                proc.write_u32(slot0, saved);
-                Ok(format!("已恢复: {:08X} -> {:08X}\n现在可以安全开菜单了", cur, saved))
+            if cur != KATALINA {
+                proc.write_u32(slot0, KATALINA);
+                Ok(format!("已恢复: {:08X} -> 卡塔莉娜({:08X})\n现在可以安全开菜单/存档了", cur, KATALINA))
             } else {
-                Err("没有保存的原角色记录 (隐藏槽为空)".into())
+                Ok("当前已经是卡塔莉娜".into())
             }
         }
         _ => Err("无效模式".into()),
@@ -209,11 +210,13 @@ pub fn scan_u32_all(value: u32) -> Vec<u64> {
 }
 
 /// 过滤: 保留当前值仍 = role_id 的地址 (切换后值变了的位置被淘汰)
-pub fn filter_selected(addrs: &[u64], role_id: u32) -> Vec<u64> {
+pub fn filter_selected(addrs: &[u64], current_role_id: u32) -> Vec<u64> {
     let pid = match Process::find_by_name(GAME_PROCESS) { Some(p) => p, None => return vec![] };
     let proc = match Process::open(pid) { Ok(p) => p, Err(_) => return vec![] };
+    // 保留"值 = 当前角色ID"的地址: 切换角色后选中指针跟随变化, 静态数据(其他角色)被淘汰
+    // 每轮用新角色ID过滤, 候选快速减少
     addrs.iter().copied()
-        .filter(|a| proc.read_u32(*a) == Some(role_id))
+        .filter(|a| proc.read_u32(*a) == Some(current_role_id))
         .collect()
 }
 
@@ -243,4 +246,67 @@ pub fn disconnect() -> Result<ConnState, String> {
 pub fn conn_state() -> ConnState {
     let c = *CONNECTED.lock().unwrap();
     ConnState { connected: c, base: None }
+}
+
+
+// ============ 选中角色锁定 (freeze) ============
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+pub static LOCK_RUNNING: AtomicBool = AtomicBool::new(false);
+static mut LOCK_HANDLE: Option<std::thread::JoinHandle<()>> = None;
+
+/// 开启/关闭选中角色锁定: 持续写入目标ID, 防止UI刷新覆盖
+pub fn lock_selected(addrs: Vec<u64>, role_id: u32, enable: bool) -> Result<String, String> {
+    if enable {
+        if LOCK_RUNNING.load(Ordering::SeqCst) {
+            return Ok("已在锁定中".into());
+        }
+        if addrs.is_empty() {
+            return Err("没有要锁定的地址".into());
+        }
+        LOCK_RUNNING.store(true, Ordering::SeqCst);
+        let n = addrs.len();
+        let addrs = Arc::new(addrs);
+        unsafe {
+            LOCK_HANDLE = Some(std::thread::spawn(move || {
+                let pid = match Process::find_by_name(GAME_PROCESS) { Some(p) => p, None => return };
+                let proc = match Process::open(pid) { Ok(p) => p, Err(_) => return };
+                while LOCK_RUNNING.load(Ordering::SeqCst) {
+                    for a in addrs.iter() {
+                        proc.write_u32(*a, role_id);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(30));
+                }
+            }));
+        }
+        Ok(format!("锁定中: {} 个地址 = {:08X}", n, role_id))
+    } else {
+        LOCK_RUNNING.store(false, Ordering::SeqCst);
+        Ok("已停止锁定".into())
+    }
+}
+
+
+/// 安全写入: 只写"当前值是合法角色ID"的地址 (排除垃圾地址, 防闪退)
+pub fn write_selected_safe(addrs: &[u64], role_id: u32) -> (usize, usize) {
+    let pid = match Process::find_by_name(GAME_PROCESS) { Some(p) => p, None => return (0, 0) };
+    let proc = match Process::open(pid) { Ok(p) => p, Err(_) => return (0, 0) };
+    let valid = valid_char_ids();
+    let mut written = 0;
+    let mut skipped = 0;
+    for a in addrs {
+        match proc.read_u32(*a) {
+            Some(v) if valid.contains(&v) => {
+                if proc.write_u32(*a, role_id) { written += 1; }
+            }
+            _ => { skipped += 1; }
+        }
+    }
+    (written, skipped)
+}
+
+/// 合法角色 ID 集合 (用于写入前校验)
+pub fn valid_char_ids() -> Vec<u32> {
+    chars::all_chars().iter().map(|c| c.id).collect()
 }

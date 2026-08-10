@@ -376,14 +376,14 @@
         <div id="lyriaStatus" class="msg info"></div>
         <div class="btn-row">
           <button class="btn green" onclick="lyriaOn()">⚔ 切换露莉亚 <small style="opacity:.7">(进战斗)</small></button>
-          <button class="btn red" onclick="lyriaOff()">🛡 恢复正常角色 <small style="opacity:.7">(开菜单)</small></button>
+          <button class="btn red" onclick="lyriaOff()">🛡 恢复卡塔莉娜 <small style="opacity:.7">(开菜单/存档)</small></button>
         </div>
         <div id="lyriaMsg" class="msg"></div>
       </div>
     </div>
 
     <!-- 角色修改 (罗兰因子) -->
-    <div class="panel" id="panel4">
+    <div class="panel" id="panel3">
       <div class="notice">
         <b>角色修改（罗兰因子方法）</b> — 让因子界面显示任意角色（如罗兰），从而能打开装备/因子窗口。<br>
         <b>步骤：</b>① 因子界面选中角色A → ② 扫描 → ③ 切到角色B → ④ 过滤 → ⑤ 切回A → ⑥ 过滤 → ⑦ 写入目标。
@@ -392,21 +392,19 @@
         <div class="card-title"><span class="t-ico">🎯</span> 选中角色定位</div>
         <div class="slot-row">
           <div class="slot-current" style="width:auto"><b>角色A ID</b> <span style="color:var(--text-2);font-size:11px">当前选中的角色</span></div>
-          <select id="roleASelect" style="max-width:300px">
-            ${chars.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
-          </select>
+          <select id="roleASelect" style="max-width:300px"></select>
           <button class="btn primary" onclick="scanSelected()">① 扫描</button>
         </div>
         <div class="slot-row">
-          <div class="slot-current" style="width:auto"><b>过滤</b> <span style="color:var(--text-2);font-size:11px">切换角色后点过滤</span></div>
+          <div class="slot-current" style="width:auto"><b>当前角色</b> <span style="color:var(--text-2);font-size:11px">切到谁选谁</span></div>
+          <select id="currentRoleSelect" style="max-width:300px"></select>
           <button class="btn" onclick="filterSelected()">② 过滤</button>
         </div>
         <div class="slot-row">
           <div class="slot-current" style="width:auto"><b>目标角色</b> <span style="color:var(--text-2);font-size:11px">改成谁</span></div>
-          <select id="targetSelect" style="max-width:300px">
-            ${chars.map(c => `<option value="${c.id}">${c.name}${c.note ? ' - ' + c.note : ''}</option>`).join('')}
-          </select>
+          <select id="targetSelect" style="max-width:300px"></select>
           <button class="btn green" onclick="writeSelected()">③ 写入</button>
+          <button id="lockSelBtn" class="btn red" onclick="toggleLockSel()">🔒 锁定 (防刷新)</button>
         </div>
         <div id="selStatus" class="msg info">候选: 0</div>
         <div id="selMsg" class="msg"></div>
@@ -447,17 +445,37 @@
   </div>
 
   <script>
-    const { invoke } = window.__TAURI__;
+    const TAURI = window.__TAURI__;
+    const invoke = (TAURI && TAURI.core && TAURI.core.invoke)
+      ? TAURI.core.invoke
+      : (TAURI && TAURI.invoke)
+        ? TAURI.invoke
+        : null;
     let chars = [];
     let currentSlots = [];
 
     async function init() {
       try {
+        if (!invoke) {
+          showMsg('connMsg', '✗ Tauri API 不可用 (window.__TAURI__ 未注入)', 'err');
+          return;
+        }
         chars = await invoke('get_chars');
         renderCharTable();
+        fillCharSelects();
         // 不再自动连接, 显示状态
         await checkConn();
       } catch (e) { console.error(e); }
+    }
+
+    function fillCharSelects() {
+      const ra = document.getElementById('roleASelect');
+      const tg = document.getElementById('targetSelect');
+      const cr = document.getElementById('currentRoleSelect');
+      const opt = (c) => `<option value="${c.id}">${c.name}${c.note ? ' · ' + c.note : ''}</option>`;
+      if (ra) ra.innerHTML = chars.map(opt).join('');
+      if (tg) tg.innerHTML = chars.map(opt).join('');
+      if (cr) cr.innerHTML = chars.map(opt).join('');
     }
 
     async function checkConn() {
@@ -519,7 +537,10 @@
 
     function switchTab(idx) {
       document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', i === idx));
-      document.querySelectorAll('.panel').forEach((p, i) => p.classList.toggle('active', i === idx));
+      // 用 id 定位面板, 避免 DOM 顺序错位
+      document.querySelectorAll('.panel').forEach((p) => p.classList.remove('active'));
+      const target = document.getElementById('panel' + idx);
+      if (target) target.classList.add('active');
     }
 
     // ===== 角色修改 (罗兰因子) =====
@@ -554,18 +575,14 @@
         return;
       }
       try {
-        // 过滤: 保留值 = 角色A 的地址 (切走B后, 选中指针会变成B, 所以A的值消失)
+        // 过滤: 用当前角色ID, 保留"值=当前角色"的地址 (选中指针跟随切换, 静态数据被淘汰)
+        const curRole = parseInt(document.getElementById('currentRoleSelect').value);
         const before = selCandidates.length;
-        selCandidates = await invoke('filter_selected', { addrs: selCandidates, roleId: selRoleA });
+        selCandidates = await invoke('filter_selected', { addrs: selCandidates, roleId: curRole });
         const st = document.getElementById('selStatus');
         st.textContent = '候选: ' + selCandidates.length;
-        if (selCandidates.length > 20) {
-          msg.textContent = `过滤后 ${selCandidates.length} 个 (从 ${before}). 再切回角色A, 再过滤一次`;
-          msg.className = 'msg info';
-        } else {
-          msg.textContent = `✓ 候选 ${selCandidates.length} 个. 切回角色A确认, 或直接写入目标角色`;
-          msg.className = 'msg ok';
-        }
+        msg.textContent = `过滤后 ${selCandidates.length} 个 (从 ${before}). 再切到另一个角色, 选择后继续过滤, 直到很少`;
+        msg.className = 'msg ok';
       } catch (e) {
         msg.textContent = '✗ ' + e;
         msg.className = 'msg err';
@@ -582,8 +599,8 @@
       }
       const target = parseInt(document.getElementById('targetSelect').value);
       try {
-        const n = await invoke('write_selected', { addrs: selCandidates, roleId: target });
-        msg.textContent = `✓ 已写入 ${n} 个地址 = 目标角色. 回因子界面查看!`;
+        const [n, skipped] = await invoke('write_selected', { addrs: selCandidates, roleId: target });
+        msg.textContent = `✓ 已写入 ${n} 个地址 = 目标角色 (跳过 ${skipped} 个非角色数据). 回因子界面查看!`;
         msg.className = 'msg ok';
       } catch (e) {
         msg.textContent = '✗ ' + e;
@@ -758,6 +775,26 @@
         msg.textContent = '✓ 无限血 ' + (infHp ? '已开启' : '已关闭');
       } catch (e) {
         infHp = !infHp;
+        msg.className = 'msg err';
+        msg.textContent = '✗ ' + e;
+      }
+    }
+
+    let lockActive = false;
+
+    async function toggleLockSel() {
+      const btn = document.getElementById('lockSelBtn');
+      const msg = document.getElementById('selMsg');
+      lockActive = !lockActive;
+      try {
+        const target = parseInt(document.getElementById('targetSelect').value);
+        const r = await invoke('lock_selected', { addrs: selCandidates, roleId: target, enable: lockActive });
+        msg.className = 'msg ok';
+        msg.textContent = '✓ ' + r;
+        btn.textContent = lockActive ? '🔓 停止锁定' : '🔒 锁定 (防刷新)';
+        btn.className = lockActive ? 'btn' : 'btn red';
+      } catch (e) {
+        lockActive = !lockActive;
         msg.className = 'msg err';
         msg.textContent = '✗ ' + e;
       }

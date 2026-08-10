@@ -36,34 +36,36 @@ fn set_infinite_hp(enable: bool) -> Result<(), String> {
     game::apply_patch(&game::INFINITE_HP, enable)
 }
 
-// 选中角色修改 (罗兰因子方法)
+// 选中角色修改 (罗兰因子方法) - 异步避免卡UI
 #[tauri::command]
-fn scan_selected(role_id: u32) -> Vec<u64> {
-    game::scan_u32_all(role_id)
+async fn scan_selected(role_id: u32) -> Vec<u64> {
+    tauri::async_runtime::spawn_blocking(move || game::scan_u32_all(role_id))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-fn filter_selected(addrs: Vec<u64>, role_id: u32) -> Vec<u64> {
-    game::filter_selected(&addrs, role_id)
+async fn filter_selected(addrs: Vec<u64>, role_id: u32) -> Vec<u64> {
+    tauri::async_runtime::spawn_blocking(move || game::filter_selected(&addrs, role_id))
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
-fn write_selected(addrs: Vec<u64>, role_id: u32) -> usize {
-    let pid = match memory::Process::find_by_name(game::GAME_PROCESS) {
-        Some(p) => p,
-        None => return 0,
-    };
-    let proc = match memory::Process::open(pid) {
-        Ok(p) => p,
-        Err(_) => return 0,
-    };
-    let mut n = 0;
-    for a in &addrs {
-        if proc.write_u32(*a, role_id) {
-            n += 1;
-        }
-    }
-    n
+fn write_selected(addrs: Vec<u64>, role_id: u32) -> (usize, usize) {
+    game::write_selected_safe(&addrs, role_id)
+}
+
+#[tauri::command]
+fn lock_selected(addrs: Vec<u64>, role_id: u32, enable: bool) -> Result<String, String> {
+    game::lock_selected(addrs, role_id, enable)
+}
+
+#[tauri::command]
+fn read_u32_at(addr: u64) -> Option<u32> {
+    let pid = memory::Process::find_by_name(game::GAME_PROCESS)?;
+    let proc = memory::Process::open(pid).ok()?;
+    proc.read_u32(addr)
 }
 
 // 连接控制
@@ -94,6 +96,8 @@ fn main() {
             scan_selected,
             filter_selected,
             write_selected,
+            lock_selected,
+            read_u32_at,
             connect,
             disconnect,
             conn_state

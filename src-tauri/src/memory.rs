@@ -13,6 +13,7 @@ use windows_sys::Win32::System::Threading::{
 
 pub struct Process {
     pub handle: HANDLE,
+    pub pid: u32,
 }
 
 impl Process {
@@ -63,13 +64,13 @@ impl Process {
             if handle.is_null() {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Process { handle })
+            Ok(Process { handle, pid })
         }
     }
 
     pub fn module_base(&self, name: &str) -> Option<u64> {
         unsafe {
-            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, self.pid);
             if snap == INVALID_HANDLE_VALUE {
                 return None;
             }
