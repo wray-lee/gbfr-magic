@@ -38,9 +38,9 @@ pub fn all_chars() -> Vec<CharInfo> {
         CharInfo { id: 0x9A8AF295, name: "Beatrix", note: "贝阿朵丽丝" },
         CharInfo { id: 0x9B15CFB1, name: "Eustace", note: "尤斯提斯" },
         CharInfo { id: 0x646C3168, name: "Fraux", note: "芙劳" },
-        CharInfo { id: 0x28A87C8A, name: "罗兰", note: "★全功能可用" },
-        CharInfo { id: 0x3529CC90, name: "露莉亚", note: "★战斗可用,菜单闪退" },
-        CharInfo { id: 0xF92C7821, name: "龙人伊德", note: "非战斗角色" },
+        CharInfo { id: 0x28A87C8A, name: "Roland", note: "罗兰 · ★全功能可用" },
+        CharInfo { id: 0x3529CC90, name: "Lyria", note: "露莉亚 · ★战斗可用,菜单闪退" },
+        CharInfo { id: 0xF92C7821, name: "Dragon Id", note: "龙人伊德 · 非战斗角色" },
         CharInfo { id: 0x887AE0B0, name: "(空)", note: "空槽位" },
     ]
 }
