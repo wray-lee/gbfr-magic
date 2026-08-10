@@ -1,60 +1,65 @@
 # GBFR Magic
 
-Granblue Fantasy: Relink 内存修改工具 (Rust + Tauri 2)
+Granblue Fantasy: Relink memory modding tool (Rust + Tauri 2)
 
-## 功能
+**Languages:** [English](README.md) · [中文](README_ZH.md) · [日本語](README_JA.md)
 
-### 🏰 队伍编辑器
-- 直接修改 5 个队伍槽位的角色 ID（`exe+0x701C420`，每槽 0x10）
+## Features
 
-### ✨ 露莉亚切换
-- 一键切换露莉亚 / 恢复正常角色
-- 露莉亚战斗/回城/城镇移动正常，但打开菜单会闪退（敌人模型数据）
-- 流程：切换露莉亚 → 进战斗 → 开菜单前恢复
+### Party Editor
+- Modify all 5 party slots' character IDs directly (`exe+0x701C420`, 0x10 per slot)
 
-### 🎯 角色修改（罗兰因子方法）
-- 让因子界面显示任意角色（如罗兰），从而能打开装备/因子窗口改因子
-- 原理：定位"当前选中角色 ID"指针，改成目标角色 ID
-- 步骤：① 因子界面选中角色A → ② 扫描 → ③ 切到角色B → ④ 过滤 → ⑤ 切回A → ⑥ 过滤 → ⑦ 写入目标
+### Lyria Switch
+- One-click switch Lyria / restore to Katalina (legal character)
+- Lyria works in battle / returning / town, but **opening menu crashes** (enemy model data)
+- Flow: switch to Lyria → battle → restore Katalina before menu/save (prevents save corruption)
 
-### ⚡ 战斗增强
-- **无CD**：技能无冷却（RVA 0x21EA5D9 patch）
-- **无限血**：受到伤害清零，自己打怪正常（RVA 0x1FB8D96 patch）
-- 可随时开关，关闭时还原原始字节
+### Character Mod (Roland sigil method)
+- Show any character (e.g. Roland) in the sigil screen to open equipment/sigil window
+- Principle: locate "current selected character ID" pointer, change to target character ID
+- Steps: select char A in sigil screen -> scan -> switch to char B -> filter -> back to A -> filter -> write target
 
-### 📋 角色速查
-- 全部角色 ID 参考（十六进制 + 十进制）
+### Battle Cheats
+- **No CD**: skills have no cooldown
+- **Infinite HP**: damage taken zero, your attacks normal
+- Toggle anytime, restores original bytes when off
 
-### 🔌 连接控制
-- 手动"连接 / 断开"按钮，方便刷新（不自动连接）
-- 连接时验证游戏进程和队伍指针
+### Character Reference
+- All character IDs (hex + decimal)
 
-## 特殊角色状态
+### Connection Control
+- Manual "Connect / Disconnect" buttons (no auto-connect)
+- Validates game process and party pointer on connect
 
-| 角色 | 入队 | 战斗 | 菜单 | 因子 |
+### i18n
+- Chinese / Japanese / English UI, switchable in header, persisted
+
+## Special Character Status
+
+| Character | Party | Battle | Menu | Sigil |
 |---|---|---|---|---|
-| 罗兰 | ✅ | ✅ | ✅ | ✅ 全功能 |
-| 露莉亚 | ✅ | ✅ | ❌ 闪退 | ❌ |
-| 龙人伊德 | ✅ | ❌ 非战斗角色 | - | ❌ |
+| Roland | ✅ | ✅ | ✅ | ✅ Full |
+| Lyria | ✅ | ✅ | ❌ crash | ❌ |
+| Dragon Id | ✅ | ❌ non-combat | - | ❌ |
 
-## 构建
+## Build
 
 ```bash
 cd src-tauri
 cargo build --release
-# 输出: target/release/gbfr_tool.exe
+# Output: target/release/gbfr_tool.exe
 ```
 
-## 使用
+## Usage
 
-1. 启动游戏
-2. 运行 `gbfr_tool.exe`
-3. 点 **连接** 按钮
-4. 使用各标签页功能
+1. Start the game
+2. Run `gbfr_tool.exe`
+3. Click **Connect**
+4. Use the tabs
 
-## 技术
+## Technical
 
-- Rust + Tauri 2（windows-sys FFI）
-- 队伍指针：`exe+0x701C420`（5 槽位 x 0x10）
-- 战斗增强通过运行时 patch（RVA 固定，重启后重新应用）
-- 角色修改通过内存扫描 + 过滤定位选中角色指针（每次重启需重新定位）
+- Rust + Tauri 2 (windows-sys FFI)
+- Party pointer: `exe+0x701C420` (5 slots x 0x10)
+- Battle cheats via runtime patch (fixed RVA, re-apply after restart)
+- Character mod via memory scan + filter to locate selected char pointer (re-locate each restart)
