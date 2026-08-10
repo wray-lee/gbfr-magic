@@ -332,18 +332,24 @@
     <div class="logo">G</div>
     <h1><span>GBFR</span> Tool</h1>
     <div class="header-right">
-      <span id="gameStatus" class="status-pill offline"><span class="dot"></span><span id="statusText">未连接</span></span>
-      <button id="connectBtn" class="btn primary" style="padding:8px 18px;font-size:12.5px" onclick="doConnect()">连接</button>
-      <button id="disconnectBtn" class="btn" style="padding:8px 18px;font-size:12.5px" onclick="doDisconnect()" disabled>断开</button>
+      <span id="gameStatus" class="status-pill offline"><span class="dot"></span><span id="statusText" data-i18n="statusOffline">未连接</span></span>
+      <span id="langLabel" data-i18n="langLabel" style="font-size:12.5px;color:var(--text-1)">Language</span>
+      <select id="langSelect" onchange="setLang(this.value)" style="background:var(--bg-2);color:var(--text-0);border:1px solid var(--border);padding:7px 10px;border-radius:8px;font-size:12.5px;cursor:pointer">
+        <option value="zh">中文</option>
+        <option value="ja">日本語</option>
+        <option value="en">English</option>
+      </select>
+      <button id="connectBtn" class="btn primary" style="padding:8px 18px;font-size:12.5px" onclick="doConnect()" data-i18n="connect">连接</button>
+      <button id="disconnectBtn" class="btn" style="padding:8px 18px;font-size:12.5px" onclick="doDisconnect()" disabled data-i18n="disconnect">断开</button>
     </div>
   </div>
 
   <div class="tabs">
-    <div class="tab active" onclick="switchTab(0)"><span class="tab-emoji">🏰</span> 队伍编辑器</div>
-    <div class="tab" onclick="switchTab(1)"><span class="tab-emoji">✨</span> 露莉亚切换</div>
-    <div class="tab" onclick="switchTab(2)"><span class="tab-emoji">📋</span> 角色速查</div>
-    <div class="tab" onclick="switchTab(3)"><span class="tab-emoji">🎯</span> 角色修改</div>
-    <div class="tab" onclick="switchTab(4)"><span class="tab-emoji">⚡</span> 战斗增强</div>
+    <div class="tab active" onclick="switchTab(0)"><span class="tab-emoji">🏰</span> <span data-i18n="tabParty">队伍编辑器</span></div>
+    <div class="tab" onclick="switchTab(1)"><span class="tab-emoji">✨</span> <span data-i18n="tabLyria">露莉亚切换</span></div>
+    <div class="tab" onclick="switchTab(2)"><span class="tab-emoji">📋</span> <span data-i18n="tabChars">角色速查</span></div>
+    <div class="tab" onclick="switchTab(3)"><span class="tab-emoji">🎯</span> <span data-i18n="tabCharMod">角色修改</span></div>
+    <div class="tab" onclick="switchTab(4)"><span class="tab-emoji">⚡</span> <span data-i18n="tabBattle">战斗增强</span></div>
   </div>
 
   <div class="content">
@@ -351,15 +357,15 @@
     <!-- 队伍编辑器 -->
     <div class="panel active" id="panel0">
       <div class="notice">
-        <b>使用说明</b> — 通过内存直接修改队伍槽位（<code>exe+0x701C420</code>）。<br>
-        <b>罗兰</b> 全功能可用 · <b>露莉亚</b> 战斗可用（菜单会闪退）· 修改后进游戏查看队伍界面生效。
+        <b data-i18n="partyNotice1">使用说明</b><span data-i18n="partyNotice2"> — 通过内存直接修改<span data-i18n="partySlots">队伍槽位</span></span>（<code>exe+0x701C420</code>）。<br>
+        <b data-i18n="roland">罗兰</b><span data-i18n="partyNotice3"> 全功能可用 · </span><b data-i18n="lyria">露莉亚</b><span data-i18n="partyNotice4"> 战斗可用（菜单会闪退）· 修改后进游戏查看队伍界面生效。</span>
       </div>
       <div class="card">
-        <div class="card-title"><span class="t-ico">⚔️</span> 队伍槽位</div>
+        <div class="card-title"><span class="t-ico">⚔️</span> <span data-i18n="partySlots">队伍槽位</span></div>
         <div id="slotList"></div>
         <div class="btn-row">
-          <button class="btn primary" onclick="applyAllSlots()">✓ 应用全部修改</button>
-          <button class="btn ghost" onclick="refreshSlots()">↻ 重新读取</button>
+          <button class="btn primary" onclick="applyAllSlots()"><span data-i18n="applyAll">✓ 应用全部修改</span></button>
+          <button class="btn ghost" onclick="refreshSlots()"><span data-i18n="reload">↻ 重新读取</span></button>
         </div>
         <div id="slotMsg" class="msg"></div>
       </div>
@@ -375,8 +381,8 @@
         <div class="card-title"><span class="t-ico">✨</span> 切换操作</div>
         <div id="lyriaStatus" class="msg info"></div>
         <div class="btn-row">
-          <button class="btn green" onclick="lyriaOn()">⚔ 切换露莉亚 <small style="opacity:.7">(进战斗)</small></button>
-          <button class="btn red" onclick="lyriaOff()">🛡 恢复卡塔莉娜 <small style="opacity:.7">(开菜单/存档)</small></button>
+          <button class="btn green" onclick="lyriaOn()">⚔ <span data-i18n="lyriaOn">切换露莉亚</span> <small style="opacity:.7" data-i18n="lyriaOnNote">(进战斗)</small></button>
+          <button class="btn red" onclick="lyriaOff()">🛡 <span data-i18n="lyriaOff">恢复卡塔莉娜</span> <small style="opacity:.7" data-i18n="lyriaOffNote">(开菜单/存档)</small></button>
         </div>
         <div id="lyriaMsg" class="msg"></div>
       </div>
@@ -385,26 +391,26 @@
     <!-- 角色修改 (罗兰因子) -->
     <div class="panel" id="panel3">
       <div class="notice">
-        <b>角色修改（罗兰因子方法）</b> — 让因子界面显示任意角色（如罗兰），从而能打开装备/因子窗口。<br>
-        <b>步骤：</b>① 因子界面选中角色A → ② 扫描 → ③ 切到角色B → ④ 过滤 → ⑤ 切回A → ⑥ 过滤 → ⑦ 写入目标。
+        <b data-i18n="charModNotice1">角色修改（罗兰因子方法）</b><span data-i18n="charModNotice2"> — 让因子界面显示任意角色（如罗兰），从而能打开装备/因子窗口。</span><br>
+        <b data-i18n="charModNotice3">步骤：</b><span data-i18n="charModNotice4">① 因子界面选中角色A → ② 扫描 → ③ 切到角色B → ④ 过滤 → ⑤ 切回A → ⑥ 过滤 → ⑦ 写入目标。</span>
       </div>
       <div class="card">
         <div class="card-title"><span class="t-ico">🎯</span> 选中角色定位</div>
         <div class="slot-row">
-          <div class="slot-current" style="width:auto"><b>角色A ID</b> <span style="color:var(--text-2);font-size:11px">当前选中的角色</span></div>
+          <div class="slot-current" style="width:auto"><b data-i18n="roleA">角色A ID</b> <span style="color:var(--text-2);font-size:11px">当前选中的角色</span></div>
           <select id="roleASelect" style="max-width:300px"></select>
-          <button class="btn primary" onclick="scanSelected()">① 扫描</button>
+          <button class="btn primary" onclick="scanSelected()"><span data-i18n="scan">① 扫描</span></button>
         </div>
         <div class="slot-row">
-          <div class="slot-current" style="width:auto"><b>当前角色</b> <span style="color:var(--text-2);font-size:11px">切到谁选谁</span></div>
+          <div class="slot-current" style="width:auto"><b data-i18n="curRole">当前角色</b> <span style="color:var(--text-2);font-size:11px">切到谁选谁</span></div>
           <select id="currentRoleSelect" style="max-width:300px"></select>
-          <button class="btn" onclick="filterSelected()">② 过滤</button>
+          <button class="btn" onclick="filterSelected()"><span data-i18n="filter">② 过滤</span></button>
         </div>
         <div class="slot-row">
-          <div class="slot-current" style="width:auto"><b>目标角色</b> <span style="color:var(--text-2);font-size:11px">改成谁</span></div>
+          <div class="slot-current" style="width:auto"><b data-i18n="targetRole">目标角色</b> <span style="color:var(--text-2);font-size:11px">改成谁</span></div>
           <select id="targetSelect" style="max-width:300px"></select>
-          <button class="btn green" onclick="writeSelected()">③ 写入</button>
-          <button id="lockSelBtn" class="btn red" onclick="toggleLockSel()">🔒 锁定 (防刷新)</button>
+          <button class="btn green" onclick="writeSelected()"><span data-i18n="write">③ 写入</span></button>
+          <button id="lockSelBtn" class="btn red" onclick="toggleLockSel()">🔒 <span data-i18n="lock">锁定</span> <span data-i18n="lockNote">(防刷新)</span></button>
         </div>
         <div id="selStatus" class="msg info">候选: 0</div>
         <div id="selMsg" class="msg"></div>
@@ -414,17 +420,17 @@
     <!-- 战斗增强 -->
     <div class="panel" id="panel4">
       <div class="notice">
-        <b>战斗增强</b> — 通过内存 patch 实现，可随时开关。<br>
-        无CD: 技能无冷却 · 无限血: 受到伤害清零（自己打怪正常）。
+        <b data-i18n="battleNotice1">战斗增强</b><span data-i18n="battleNotice2"> — 通过内存 patch 实现，可随时开关。</span><br>
+        <span data-i18n="battleNotice3">无CD: 技能无冷却 · 无限血: 受到伤害清零（自己打怪正常）。</span>
       </div>
       <div class="card">
         <div class="card-title"><span class="t-ico">⚡</span> 开关</div>
         <div class="slot-row">
-          <div class="slot-current" style="width:auto"><b>无CD</b> <span style="color:var(--text-2);font-size:11px">技能无冷却</span></div>
+          <div class="slot-current" style="width:auto"><b data-i18n="noCd">无CD</b> <span style="color:var(--text-2);font-size:11px">技能无冷却</span></div>
           <button id="noCdBtn" class="btn" onclick="toggleNoCd()" style="margin-left:auto">关</button>
         </div>
         <div class="slot-row">
-          <div class="slot-current" style="width:auto"><b>无限血</b> <span style="color:var(--text-2);font-size:11px">受到伤害清零</span></div>
+          <div class="slot-current" style="width:auto"><b data-i18n="infHp">无限血</b> <span style="color:var(--text-2);font-size:11px">受到伤害清零</span></div>
           <button id="hpBtn" class="btn" onclick="toggleHp()" style="margin-left:auto">关</button>
         </div>
         <div id="cheatMsg" class="msg"></div>
@@ -436,7 +442,7 @@
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>角色</th><th>ID (Hex)</th><th>ID (十进制)</th><th>状态</th></tr>
+            <tr><th data-i18n="colChar">角色</th><th>ID (Hex)</th><th data-i18n="colDec">ID (十进制)</th><th data-i18n="colStatus">状态</th></tr>
           </thead>
           <tbody id="charTable"></tbody>
         </table>
@@ -451,11 +457,85 @@
       : (TAURI && TAURI.invoke)
         ? TAURI.invoke
         : null;
+    // ============ i18n ============
+    const I18N = {
+      zh: {
+        statusConnected: '已连接', statusOffline: '未连接 · 游戏未运行', connecting: '连接中...',
+        connect: '连接', disconnect: '断开',
+        tabParty: '队伍编辑器', tabLyria: '露莉亚切换', tabChars: '角色速查', tabCharMod: '角色修改', tabBattle: '战斗增强',
+        partyNotice1: '使用说明', partyNotice2: ' — 通过内存直接修改队伍槽位', partyNotice3: ' 全功能可用 · ', partyNotice4: ' 战斗可用（菜单会闪退）· 修改后进游戏查看队伍界面生效。',
+        roland: '罗兰', lyria: '露莉亚',
+        partySlots: '队伍槽位', applyAll: '✓ 应用全部修改', reload: '↻ 重新读取',
+        lyriaNotice1: ' 战斗 / 回城 / 城镇移动 ', lyriaNotice2: '完全正常', lyriaNotice3: '，但打开菜单会闪退（她的数据是敌人模型）。', lyriaNotice4: '流程：切换露莉亚 → 进战斗 → 开菜单/存档前恢复为卡塔莉娜(合法角色, 防坏档)。',
+        lyriaOn: '切换露莉亚', lyriaOnNote: '(进战斗)', lyriaOff: '恢复卡塔莉娜', lyriaOffNote: '(开菜单/存档)',
+        charModNotice1: '角色修改（罗兰因子方法）', charModNotice2: ' — 让因子界面显示任意角色（如罗兰），从而能打开装备/因子窗口。', charModNotice3: '步骤：', charModNotice4: '① 因子界面选中角色A → ② 扫描 → ③ 切到角色B → ④ 过滤 → ⑤ 切回A → ⑥ 过滤 → ⑦ 写入目标。',
+        roleA: '角色A ID', curRole: '当前角色', targetRole: '目标角色',
+        scan: '① 扫描', filter: '② 过滤', write: '③ 写入', lock: '锁定', lockNote: '(防刷新)',
+        battleNotice1: '战斗增强', battleNotice2: ' — 通过内存 patch 实现，可随时开关。', battleNotice3: '无CD: 技能无冷却 · 无限血: 受到伤害清零（自己打怪正常）。',
+        noCd: '无CD', infHp: '无限血',
+        colChar: '角色', colDec: 'ID (十进制)', colStatus: '状态', langLabel: '语言',
+      },
+      ja: {
+        statusConnected: '接続済み', statusOffline: '未接続 · ゲーム未起動', connecting: '接続中...',
+        connect: '接続', disconnect: '切断',
+        tabParty: 'パーティ編集', tabLyria: 'ルリア切替', tabChars: 'キャラ一覧', tabCharMod: 'キャラ変更', tabBattle: '戦闘強化',
+        partyNotice1: '説明', partyNotice2: ' — メモリでパーティスロットを変更', partyNotice3: ' 全機能使用可 · ', partyNotice4: ' 戦闘使用可（メニューでクラッシュ）· 変更後ゲームで確認。',
+        roland: 'ロラン', lyria: 'ルリア',
+        partySlots: 'パーティスロット', applyAll: '✓ 全て適用', reload: '↻ 再読込',
+        lyriaNotice1: ' 戦闘 / 帰還 / 街移動 ', lyriaNotice2: '完全正常', lyriaNotice3: 'だがメニューを開くとクラッシュ（敵モデルデータ）。', lyriaNotice4: '手順：ルリアに切替 → 戦闘 → メニュー/セーブ前にカタリナに復元(正規キャラ, 破損防止)。',
+        lyriaOn: 'ルリアに切替', lyriaOnNote: '(戦闘用)', lyriaOff: 'カタリナに復元', lyriaOffNote: '(メニュー/セーブ用)',
+        charModNotice1: 'キャラ変更（ロラン因子方法）', charModNotice2: ' — 因子画面に任意キャラを表示して装備/因子窓を開く。', charModNotice3: '手順：', charModNotice4: '① 因子画面でキャラA選択 → ② スキャン → ③ キャラBへ切替 → ④ フィルタ → ⑤ Aへ戻る → ⑥ フィルタ → ⑦ 目標書込。',
+        roleA: 'キャラA ID', curRole: '現在キャラ', targetRole: '目標キャラ',
+        scan: '① スキャン', filter: '② フィルタ', write: '③ 書込', lock: 'ロック', lockNote: '(リフレッシュ防止)',
+        battleNotice1: '戦闘強化', battleNotice2: ' — メモリパッチで実装、随時ON/OFF可能。', battleNotice3: 'CD無し: スキルクールダウンなし · 無限HP: 被ダメージ0（自分の攻撃は正常）。',
+        noCd: 'CD無し', infHp: '無限HP',
+        colChar: 'キャラ', colDec: 'ID (10進)', colStatus: '状態', langLabel: '言語',
+      },
+      en: {
+        statusConnected: 'Connected', statusOffline: 'Disconnected · Game not running', connecting: 'Connecting...',
+        connect: 'Connect', disconnect: 'Disconnect',
+        tabParty: 'Party Editor', tabLyria: 'Lyria Switch', tabChars: 'Character List', tabCharMod: 'Char Mod', tabBattle: 'Battle Cheats',
+        partyNotice1: 'Info', partyNotice2: ' — Modify party slots via memory', partyNotice3: ' fully playable · ', partyNotice4: ' playable in battle (menu crashes) · check in-game after changing.',
+        roland: 'Roland', lyria: 'Lyria',
+        partySlots: 'Party Slots', applyAll: '✓ Apply All', reload: '↻ Reload',
+        lyriaNotice1: ' battle / return / town ', lyriaNotice2: 'fully works', lyriaNotice3: ', but opening menu crashes (enemy model data).', lyriaNotice4: 'Flow: switch to Lyria → battle → restore Katalina (legal char, prevent corruption) before menu/save.',
+        lyriaOn: 'Switch to Lyria', lyriaOnNote: '(battle)', lyriaOff: 'Restore Katalina', lyriaOffNote: '(menu/save)',
+        charModNotice1: 'Char Mod (Roland sigil method)', charModNotice2: ' — show any char in sigil screen to open equipment/sigil window.', charModNotice3: 'Steps: ', charModNotice4: '① select char A in sigil screen → ② scan → ③ switch to char B → ④ filter → ⑤ back to A → ⑥ filter → ⑦ write target.',
+        roleA: 'Char A ID', curRole: 'Current Char', targetRole: 'Target Char',
+        scan: '① Scan', filter: '② Filter', write: '③ Write', lock: 'Lock', lockNote: '(prevent refresh)',
+        battleNotice1: 'Battle Cheats', battleNotice2: ' — implemented via memory patch, toggle anytime.', battleNotice3: 'No CD: skills no cooldown · Inf HP: damage taken zero (your attacks normal).',
+        noCd: 'No CD', infHp: 'Inf HP',
+        colChar: 'Character', colDec: 'ID (Decimal)', colStatus: 'Status', langLabel: 'Language',
+      }
+    };
+
+    let currentLang = localStorage.getItem('gbfr_lang') || 'en';
+
+    function t(key) {
+      return (I18N[currentLang] && I18N[currentLang][key]) || key;
+    }
+
+    function applyI18n() {
+      document.querySelectorAll('[data-i18n]').forEach(el => {
+        el.textContent = t(el.getAttribute('data-i18n'));
+      });
+      const ls = document.getElementById('langSelect');
+      if (ls) ls.value = currentLang;
+    }
+
+    function setLang(lang) {
+      currentLang = lang;
+      localStorage.setItem('gbfr_lang', lang);
+      applyI18n();
+      refreshAll();
+    }
+
     let chars = [];
     let currentSlots = [];
 
     async function init() {
       try {
+        applyI18n();
         if (!invoke) {
           showMsg('connMsg', '✗ Tauri API 不可用 (window.__TAURI__ 未注入)', 'err');
           return;
@@ -488,7 +568,7 @@
     async function doConnect() {
       const btn = document.getElementById('connectBtn');
       btn.disabled = true;
-      btn.textContent = '连接中...';
+      btn.textContent = t('connecting');
       try {
         const st = await invoke('connect');
         updateConnUI(true);
@@ -517,7 +597,7 @@
       const discBtn = document.getElementById('disconnectBtn');
       if (connected) {
         pill.className = 'status-pill online';
-        txt.textContent = '已连接';
+        txt.textContent = t('statusConnected');
         connBtn.disabled = true;
         discBtn.disabled = false;
       } else {
@@ -616,10 +696,10 @@
         const txt = document.getElementById('statusText');
         if (st.running) {
           pill.className = 'status-pill online';
-          txt.textContent = '已连接';
+          txt.textContent = t('statusConnected');
         } else {
           pill.className = 'status-pill offline';
-          txt.textContent = '未连接 · 游戏未运行';
+          txt.textContent = t('statusOffline');
         }
         currentSlots = st.slots || [];
         renderSlots();
@@ -791,7 +871,7 @@
         const r = await invoke('lock_selected', { addrs: selCandidates, roleId: target, enable: lockActive });
         msg.className = 'msg ok';
         msg.textContent = '✓ ' + r;
-        btn.textContent = lockActive ? '🔓 停止锁定' : '🔒 锁定 (防刷新)';
+        btn.textContent = lockActive ? '🔓 停止锁定' : '🔒 <span data-i18n="lock">锁定</span> <span data-i18n="lockNote">(防刷新)</span>';
         btn.className = lockActive ? 'btn' : 'btn red';
       } catch (e) {
         lockActive = !lockActive;
