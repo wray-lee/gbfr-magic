@@ -272,6 +272,11 @@ unsafe fn tel_try_install(
 
 // 安装两个 telemetry far stub (幂等: 已装 / 门控不过 → 静默 false; all-or-nothing 回滚)
 pub fn install() -> bool {
+    // T5 诊断: no_telemetry → 永不安装 (unhook 幂等, 空槽 no-op 安全)
+    if crate::DIAG_NO_TELEMETRY.load(Ordering::Relaxed) {
+        log("[tel] SKIPPED (diag no_telemetry)");
+        return false;
+    }
     unsafe {
         let handle = MP_HANDLE.load(Ordering::Relaxed);
         let sp = std::ptr::read_unaligned(std::ptr::addr_of!(FN_START_PROCESSING));

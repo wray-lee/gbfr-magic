@@ -247,7 +247,7 @@ unsafe fn clear_hook(h: *mut *mut detour::Hook) -> bool {
 }
 
 // 安装 hook (注入时调用)
-pub fn install_lobby_hooks() -> bool {
+pub fn install_lobby_hooks(no_join: bool) -> bool {
     unsafe {
         let sdk_range = detour::module_range("PlayFabMultiplayerWin.dll");
         let game_range = detour::module_range("granblue_fantasy_relink.exe");
@@ -328,39 +328,44 @@ pub fn install_lobby_hooks() -> bool {
             None => results.push(false),
         }
         // T10: 官方异步入房入口 (far stub, out-param 槽捕获) — 均为 SDK 导出, len=6 (push 序言家族同 B22)
-        match try_install(
-            FN_JOIN_LOBBY,
-            6,
-            "JoinLobby",
-            "PlayFabMultiplayerWin.dll",
-            sdk_range,
-            true,
-            gbfr_join_stub as *const () as usize,
-        ) {
-            Some(h) => {
-                JOIN_NEAR = h.near_addr();
-                gbfr_join_tramp = h.trampoline() as u64;
-                HOOK_JOIN = Box::into_raw(Box::new(h));
-                results.push(true);
+        // T5 诊断: no_join → 不安装这两个 far stub (结果向量少两项, all-or-nothing 只看存在的项)
+        if !no_join {
+            match try_install(
+                FN_JOIN_LOBBY,
+                6,
+                "JoinLobby",
+                "PlayFabMultiplayerWin.dll",
+                sdk_range,
+                true,
+                gbfr_join_stub as *const () as usize,
+            ) {
+                Some(h) => {
+                    JOIN_NEAR = h.near_addr();
+                    gbfr_join_tramp = h.trampoline() as u64;
+                    HOOK_JOIN = Box::into_raw(Box::new(h));
+                    results.push(true);
+                }
+                None => results.push(false),
             }
-            None => results.push(false),
-        }
-        match try_install(
-            FN_CREATE_JOIN,
-            6,
-            "CreateAndJoinLobby",
-            "PlayFabMultiplayerWin.dll",
-            sdk_range,
-            true,
-            gbfr_createjoin_stub as *const () as usize,
-        ) {
-            Some(h) => {
-                CREATEJOIN_NEAR = h.near_addr();
-                gbfr_createjoin_tramp = h.trampoline() as u64;
-                HOOK_CREATEJOIN = Box::into_raw(Box::new(h));
-                results.push(true);
+            match try_install(
+                FN_CREATE_JOIN,
+                6,
+                "CreateAndJoinLobby",
+                "PlayFabMultiplayerWin.dll",
+                sdk_range,
+                true,
+                gbfr_createjoin_stub as *const () as usize,
+            ) {
+                Some(h) => {
+                    CREATEJOIN_NEAR = h.near_addr();
+                    gbfr_createjoin_tramp = h.trampoline() as u64;
+                    HOOK_CREATEJOIN = Box::into_raw(Box::new(h));
+                    results.push(true);
+                }
+                None => results.push(false),
             }
-            None => results.push(false),
+        } else {
+            log("[kick] JOIN/CREATEJOIN skipped (diag no_join)");
         }
         if !decide_all_or_nothing(&results) {
             // T2: 全量回滚 — 本次调用已装的 hook 全部还原, 静态清零 (clear_hook = T5 幂等清理)
@@ -385,7 +390,7 @@ pub fn install_lobby_hooks() -> bool {
             log("[kick] PARTIAL INSTALL ROLLED BACK");
             return false;
         }
-        log("[kick] hooks installed (11: PostUpdate/GetLobbyId/GetMembers/GetOwner/GetMemberProperty/GetLobbyProperty/GetConnectionString/GetMemberConnectionStatus/KICKCFG-rdi-swap/JoinLobby/CreateAndJoinLobby)");
+        log(&format!("[kick] hooks installed ({}: PostUpdate/GetLobbyId/GetMembers/GetOwner/GetMemberProperty/GetLobbyProperty/GetConnectionString/GetMemberConnectionStatus/KICKCFG-rdi-swap/JoinLobby/CreateAndJoinLobby)", results.len()));
         true
     }
 }

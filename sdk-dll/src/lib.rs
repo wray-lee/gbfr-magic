@@ -29,6 +29,27 @@ pub static ANTIKICK: AtomicBool = AtomicBool::new(false);    // 防踢开关
 
 const CMD_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_sdk_cmd.txt";
 const OUT_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_sdk_out.txt";
+// T5 诊断开关文件 (DLL 加载时读一次; inject.exe 无法改已运行进程的环境变量)
+// 每行一个选项, 未知/空行忽略, 大小写不敏感: no_telemetry / no_join
+const DIAG_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_diag.txt";
+
+// T5 诊断开关 (DllMain 从 DIAG_FILE 解析后写入; 默认全关 = 原有完整行为)
+pub static DIAG_NO_TELEMETRY: AtomicBool = AtomicBool::new(false);
+pub static DIAG_NO_JOIN: AtomicBool = AtomicBool::new(false);
+
+// 纯函数: 解析诊断开关文件内容 (单测覆盖; 文件读取在 DllMain)
+pub fn parse_diag_flags(content: &str) -> (bool, bool) {
+    let mut no_telemetry = false;
+    let mut no_join = false;
+    for raw in content.lines() {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "no_telemetry" => no_telemetry = true,
+            "no_join" => no_join = true,
+            _ => {}
+        }
+    }
+    (no_telemetry, no_join)
+}
 
 // UTC 时间戳 e.g. "2026-08-11T12:34:56Z", 每个 log 行前缀
 fn ts() -> String {
@@ -275,8 +296,17 @@ pub unsafe extern "system" fn DllMain(_h: *mut core::ffi::c_void, reason: u32, _
         sdk::init();
         // 抓 handle: hook SDK StartProcessing 入口, 游戏下一帧调用时抓到
         sdk::install_grab_handle();
+        // T5: 诊断开关 (读失败/无文件 = 默认全关, 行为不变)
+        let (no_telemetry, no_join) = std::fs::read_to_string(DIAG_FILE)
+            .map(|s| parse_diag_flags(&s))
+            .unwrap_or((false, false));
+        DIAG_NO_TELEMETRY.store(no_telemetry, Ordering::Relaxed);
+        DIAG_NO_JOIN.store(no_join, Ordering::Relaxed);
+        if no_telemetry || no_join {
+            log(&format!("[dll] diag: no_telemetry={} no_join={}", no_telemetry, no_join));
+        }
         // K1/B21-B22: hook SDK PFLobbyPostUpdate/PFLobbyGetLobbyId 导出抓 lobby handle (B12)
-        kick::install_lobby_hooks();
+        kick::install_lobby_hooks(no_join);
         let mut tid = 0u32;
         CreateThread(std::ptr::null(), 0, Some(cmd_thread), std::ptr::null_mut(), 0, &mut tid);
     }
@@ -348,5 +378,24 @@ mod tests {
         assert_eq!(ts_from_secs(0), "1970-01-01T00:00:00Z");
         assert_eq!(ts_from_secs(1_786_406_400), "2026-08-11T00:00:00Z");
         assert_eq!(marker(Some(123_456)), "#123456");
+    }
+
+    #[test]
+    fn diag_empty_and_missing_defaults_off() {
+        assert_eq!(parse_diag_flags(""), (false, false));
+        assert_eq!(parse_diag_flags("   \n\t\n"), (false, false));
+    }
+
+    #[test]
+    fn diag_flags_parse_with_trim_and_case_insensitive() {
+        assert_eq!(parse_diag_flags("no_telemetry\nno_join"), (true, true));
+        assert_eq!(parse_diag_flags("  NO_TELEMETRY  \n"), (true, false));
+        assert_eq!(parse_diag_flags("no_join"), (false, true));
+    }
+
+    #[test]
+    fn diag_unknown_lines_ignored() {
+        assert_eq!(parse_diag_flags("bogus\nno_kick\nNO_TELEMETRY_extra"), (false, false));
+        assert_eq!(parse_diag_flags("no_telemetry\nno_join\n# comment"), (true, true));
     }
 }
