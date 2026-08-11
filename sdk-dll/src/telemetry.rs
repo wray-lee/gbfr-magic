@@ -149,7 +149,8 @@ gbfr_tel_start_tramp:
     "#
 );
 // tel_leave_stub: hook PFLobbyLeave 入口 (rcx=lobby handle, 原样透传给 Rust)
-// 入口 rsp%16=8; 2×push(0x10) → 0; sub 0x20 → call 前 0; add/pop 后恢复
+// 栈对齐 (x64 ABI): 入口 rsp%16=8; 2×push(0x10) → rsp%16=8; sub 0x28 (0x28≡8 mod 16) → 0 再 call;
+//   add 0x28 恢复 → pop×2 回入口 rsp%16=8 (sub 0x20 会留 8, call 时 misalign — 2026-08-11 修复)
 core::arch::global_asm!(
     r#"
     .text
@@ -160,9 +161,9 @@ gbfr_tel_leave_stub:
     mov rax, qword ptr [rip + gbfr_tel_leave_fn]
     test rax, rax
     je gbfr_tel_leave_skip
-    sub rsp, 0x20
+    sub rsp, 0x28
     call rax
-    add rsp, 0x20
+    add rsp, 0x28
 gbfr_tel_leave_skip:
     pop rcx
     pop rax
