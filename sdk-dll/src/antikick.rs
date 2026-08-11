@@ -17,12 +17,24 @@
 //   → 与 B15 张力: 若判定走 SDK 内部状态 (而非游戏侧按 change 更新), 本方案无效
 // - 风险: 0x63C90 返回 0 (null change) 对调用方 0x734E0 的处理未验证; 服务器端移除是既成事实
 //   真正留在房间需配合自动重进 (B15/B18.5)
+//
+// T6 隔离 (quarantine, 见 learnings.md):
+// (a) 服务器端移除是最终结果 (leader PostUpdate 已提交) — 本地抑制只掩盖 UI 表现,
+//     不会让你留在房间
+// (b) 唯一被接受的未来路径: 检测 (收到自己的 MemberRemoved change) + 自动重进
+//     (保存 lobbyId+password 后重新加入) — 未来工作, 未实现
+// (c) 证据等级: B18.4 静态设计未动态验证; B15 动态矛盾 (被踢判定在 SDK 内部);
+//     B29 动态崩溃 (启用防踢 + 被踢 → 闪退) — 故默认禁用, 需显式 antikick_exp on
 use crate::detour;
 use crate::sdk::sdk_base;
 use crate::{log, MY_ID};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SDK_MEMBER_REMOVED_FACTORY: u64 = 0x63C90;
+
+// T6: 实验开关 — 默认 false (硬性默认关闭, B29 崩溃隔离);
+// 仅控制 install() 的安装许可 + set_enabled 的 0 强制 (stub 内运行时闸门仍是 gbfr_ak_enabled)
+pub static ANTIKICK_EXPERIMENTAL: AtomicBool = AtomicBool::new(false);
 
 // 防踢 stub (汇编, 位于本 DLL 内; detour::install_far 从近块跳到这里):
 // 参数: rcx=lobby对象, rdx=成员实体, r8=成员实体?, r9d=reason
@@ -105,13 +117,37 @@ unsafe extern "C" {
     static mut gbfr_ak_tramp: u64;
 }
 
+// T6: 指针可读性决策 (纯函数, 单测) — 镜像 VirtualQuery 决策: p==0 / p<0x10000 / 未提交 → false
+// T1: pub(crate) — telemetry.rs 复用 (不重复实现)
+pub(crate) fn ptr_safe(p: u64, committed: bool) -> bool {
+    p != 0 && p >= 0x10000 && committed
+}
+
+// T6: VirtualQuery 提交状态检查 (返回 0 或 State!=MEM_COMMIT → 不可读)
+// T1: pub(crate) — telemetry.rs 复用 (不重复实现)
+pub(crate) unsafe fn mem_committed(p: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEM_COMMIT, MEMORY_BASIC_INFORMATION};
+    let mut mbi = std::mem::zeroed::<MEMORY_BASIC_INFORMATION>();
+    VirtualQuery(p as *const core::ffi::c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0
+        && mbi.State == MEM_COMMIT
+}
+
 // 判断成员实体是否是自己 (rdx 指向 PFEntityKey 风格 {id*, type*})
 // extern "system" 在 x64 Windows 即标准 ABI (与 C 一致), stub 以 rcx=rdx 调用, eax 收返回值
+// B29: 加 VirtualQuery 可读性校验 — 动态实测被踢时游戏闪退, 根因疑似 0x63C90 的 rdx
+// 并非总是有效 PFEntityKey (B15 有张力: 被踢判定在 SDK 内部); 读非法指针 → AV → 闪退
+// T6: MY_ID (my) 同样加守卫 — B29 崩溃向量之一: my 是 stale/freed 指针 (setid 释放后
+// 未清 MY_ID); 守卫失败 → 日志 + pass-through (不抑制)
 unsafe extern "system" fn ak_check(entity: usize) -> i32 {
     let my = MY_ID.load(Ordering::Relaxed);
     if my == 0 || entity == 0 { return 0; }
+    if !ptr_safe(my, mem_committed(my as usize)) {
+        log("[ak] MY_ID invalid, pass-through");
+        return 0;
+    }
+    if !ptr_safe(entity as u64, mem_committed(entity)) { return 0; }
     let id_ptr = *(entity as *const u64);
-    if id_ptr == 0 { return 0; }
+    if !ptr_safe(id_ptr, mem_committed(id_ptr as usize)) { return 0; }
     // 比较字符串
     let mut i = 0usize;
     loop {
@@ -125,24 +161,78 @@ unsafe extern "system" fn ak_check(entity: usize) -> i32 {
 }
 
 static mut AK_NEAR: usize = 0;
+static mut HOOK_AK: *mut detour::Hook = std::ptr::null_mut(); // B29: 供 unload 恢复
+
+// T6: 目标开关值 (纯函数, 单测) — 实验模式关时恒 0 ("off 永远赢", 无论请求值)
+fn next_enabled(experimental: bool, current: u64) -> u64 {
+    if experimental { current } else { 0 }
+}
+
+// T6: 实验模式开关 — on: 允许 install() 且日志明示崩溃风险;
+// off: 强制 gbfr_ak_enabled=0 (set_enabled(false)), 已装 hook 保留但禁用 (不自动卸载)
+pub fn set_experimental(on: bool) {
+    ANTIKICK_EXPERIMENTAL.store(on, Ordering::Relaxed);
+    if on {
+        log("[ak] EXPERIMENTAL MODE ON — known crash risk (B29), server-side removal is final, this only suppresses local change generation");
+    } else {
+        set_enabled(false);
+        log("[ak] EXPERIMENTAL MODE OFF — hook stays installed but disabled");
+    }
+}
 
 // 防踢开关 (MAJOR-1/B21 修正: 原 antikick_off 只改 ANTIKICK 原子量, stub 读的 gbfr_ak_enabled 从未清 0)
+// T6: 写入值经 next_enabled — 实验模式关 → 恒 0 (set_enabled(false) 无条件赢)
 pub fn set_enabled(on: bool) {
+    let val = next_enabled(ANTIKICK_EXPERIMENTAL.load(Ordering::Relaxed), on as u64);
     unsafe {
-        gbfr_ak_enabled = on as u64;
+        gbfr_ak_enabled = val;
     }
-    log(if on { "[ak] enabled" } else { "[ak] disabled" });
+    log(if val != 0 { "[ak] enabled" } else { "[ak] disabled" });
+}
+
+// T5: 幂等决策 (纯函数, 单测): 槽为空 → 无需恢复
+fn ak_slot_held(h: *const detour::Hook) -> bool {
+    !h.is_null()
+}
+
+// B29: 恢复 hook (unload 命令调用)
+// T5: 幂等 — 二次调用 (HOOK_AK 已空) → no-op 日志; Box::from_raw 恰好一次
+// (T6 协调注意: 此处仅加了空槽早退 + 决策辅助函数, 未动 install/set_enabled/ak_check)
+pub fn unhook() {
+    unsafe {
+        if !ak_slot_held(HOOK_AK) {
+            log("[ak] already unhooked");
+            return;
+        }
+        (*HOOK_AK).restore();
+        let _ = Box::from_raw(HOOK_AK);
+        HOOK_AK = std::ptr::null_mut();
+        AK_NEAR = 0;
+        gbfr_ak_tramp = 0;
+        gbfr_ak_enabled = 0;
+        log("[ak] hook restored");
+    }
+}
+
+// T6: 安装许可 (纯函数, 单测) — 仅 实验模式开 + SDK 已加载 才允许
+fn install_allowed(flag: bool, sdk_loaded: bool) -> bool {
+    flag && sdk_loaded
 }
 
 // 安装防踢 hook (幂等: 已安装则只开开关)
+// T6: 顶部闸门 — ANTIKICK_EXPERIMENTAL 默认 false → 直接拒绝, 零内存写入
+//     (不装 hook, 不写 gbfr_ak_enabled; B29 崩溃隔离)
 pub fn install() {
     unsafe {
+        let b = sdk_base();
+        if !install_allowed(ANTIKICK_EXPERIMENTAL.load(Ordering::Relaxed), b != 0) {
+            log("[ak] REFUSED: antikick is EXPERIMENTAL and DISABLED by default (crashed in B29 test; server-side removal is final) — use antikick_exp on to enable");
+            return;
+        }
         if AK_NEAR != 0 {
             gbfr_ak_enabled = 1;
             return;
         }
-        let b = sdk_base();
-        if b == 0 { log("[ak] sdk not loaded"); return; }
         let target = (b + SDK_MEMBER_REMOVED_FACTORY) as usize;
         // B20: hook 区域 = 6 字节 (0x63C90 序言 40 55|56|57|41 54, 边界 {2,3,4,6,8,10,12} 7×push 完整集, len=6 在边界上, B25/MINOR-4)
         match detour::install_far(target, 6, gbfr_antikick_stub as *const () as usize) {
@@ -151,11 +241,58 @@ pub fn install() {
                 gbfr_ak_tramp = h.trampoline() as u64;
                 gbfr_ak_check_fn = ak_check as *const () as usize as u64;
                 gbfr_ak_enabled = 1;
+                HOOK_AK = Box::into_raw(Box::new(h)); // B29
                 log(&format!("[ak] hook installed at 0x{:X} (证据等级: B18.4 静态设计, B15 动态有张力, 见 B20/L6)", target));
             }
             None => {
                 log("[ak] hook install FAILED (near alloc)");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== T5: 幂等 unhook =====
+    #[test]
+    fn unhook_null_slot_is_noop() {
+        // 纯决策: 空槽 → false (不执行任何恢复动作)
+        assert!(!ak_slot_held(std::ptr::null()));
+        assert!(ak_slot_held(0x1 as *const detour::Hook));
+        // 直接连调两次: 测试进程内 HOOK_AK 恒为 null, 走 no-op 日志路径, 不触碰任何游戏内存
+        unhook();
+        unhook();
+    }
+
+    // ===== T6: 隔离闸门 =====
+    #[test]
+    fn install_refused_when_flag_off() {
+        // 全 4 组合: 仅 flag on + sdk loaded 允许
+        assert!(!install_allowed(false, true));
+        assert!(!install_allowed(false, false));
+        assert!(!install_allowed(true, false));
+        assert!(install_allowed(true, true));
+    }
+
+    #[test]
+    fn set_experimental_off_forces_disabled() {
+        // 实验模式关 → 恒 0 (无论请求值); 开 → 透传
+        assert_eq!(next_enabled(false, 0), 0);
+        assert_eq!(next_enabled(false, 1), 0);
+        assert_eq!(next_enabled(true, 0), 0);
+        assert_eq!(next_enabled(true, 1), 1);
+    }
+
+    #[test]
+    fn my_id_guard() {
+        // ptr_safe 决策: p==0 / p<0x10000 / 未提交 → false
+        assert!(!ptr_safe(0, true));
+        assert!(!ptr_safe(0, false));
+        assert!(!ptr_safe(0x8000, true));
+        assert!(!ptr_safe(0x10000, false));
+        assert!(ptr_safe(0x10000, true));
+        assert!(ptr_safe(0x7FFF_FFFF_FFFF, true));
     }
 }

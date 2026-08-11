@@ -5,15 +5,20 @@
 // 3) 防踢: hook SDK 内部 0x63C90 (antikick.rs)
 //
 // 注入方式: 主程序 CreateRemoteThread + LoadLibraryW 加载本 DLL
-// 通信: 命令文件 (scan/kick <id>/antikick_on/antikick_off/setid <hex>/state) + 结果文件
+// 通信: 命令文件 (scan/kick <id>/antikick_on/antikick_off/setid <hex>/state/unload) + 结果文件
+// 命令行可带唯一 run ID 前缀 `#<runid>` (如 `#001 state`): 精确整行去重,
+// 相同命令不同 run ID 均执行; CMD/RESULT 日志带同一 run ID 便于关联证据
 
 mod scan;
 mod kick;
 mod antikick;
 mod sdk;
 mod detour;
+mod telemetry;
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::System::Threading::CreateThread;
 
 // 全局状态 (注入进程内)
@@ -25,70 +30,215 @@ pub static ANTIKICK: AtomicBool = AtomicBool::new(false);    // 防踢开关
 const CMD_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_sdk_cmd.txt";
 const OUT_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_sdk_out.txt";
 
+// UTC 时间戳 e.g. "2026-08-11T12:34:56Z", 每个 log 行前缀
+fn ts() -> String {
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    ts_from_secs(secs)
+}
+
+// 纯函数: Unix secs → "YYYY-MM-DDTHH:MM:SSZ" (Howard Hinnant days↔civil 算法, 零依赖)
+fn ts_from_secs(secs: u64) -> String {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let (h, mi, s) = (rem / 3_600, (rem % 3_600) / 60, rem % 60);
+    let (y, mo, d) = civil_from_days(days as i64);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, mi, s)
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m as u32, d as u32)
+}
+
 pub fn log(msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(OUT_FILE) {
-        let _ = writeln!(f, "{}", msg);
+        let _ = writeln!(f, "[{}] {}", ts(), msg);
     }
+}
+
+// run ID 日志标记: Some(id) → "#001"; None → "no-runid" (警告标记)
+fn marker(runid: Option<u64>) -> String {
+    match runid {
+        Some(id) => format!("#{:03}", id),
+        None => "no-runid".to_string(),
+    }
+}
+
+// 解析单行命令: `#<runid> <cmd> [args]` 或 `<cmd> [args]`
+// 返回 (runid, tokens); 空白行 / 非法 `#` 前缀 → None (忽略)
+fn parse_cmd_line(line: &str) -> Option<(Option<u64>, Vec<&str>)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if let Some(rest) = parts[0].strip_prefix('#') {
+        Some((Some(rest.parse::<u64>().ok()?), parts[1..].to_vec()))
+    } else {
+        Some((None, parts))
+    }
+}
+
+// 消费决策: 该行是否应执行 (精确按整行去重, 含 run ID)
+// ponytail: seen 集合随不同行数增长 — 命令工具进程级, 可接受; 若出现海量 run ID 再换有界缓存
+fn line_is_new(line: &str, seen: &mut HashSet<String>) -> bool {
+    let line = line.trim();
+    !line.is_empty() && seen.insert(line.to_string())
+}
+
+// 分发命令; 返回 true 表示 unload (线程应退出)
+unsafe fn dispatch(line: &str, runid: Option<u64>, parts: &[&str]) -> bool {
+    let m = marker(runid);
+    log(&format!("[{}] CMD: {}", m, line));
+    let result = match parts.first() {
+        Some(&"scan") => {
+            scan::do_scan();
+            "done"
+        }
+        Some(&"kick") => {
+            if parts.len() >= 2 {
+                kick::do_kick(parts[1]);
+                "done"
+            } else {
+                log(&format!("[{}] kick <id>", m));
+                "usage"
+            }
+        }
+        Some(&"kickcfg_exp") => {
+            if parts.len() >= 2 && (parts[1] == "on" || parts[1] == "off") {
+                let on = parts[1] == "on";
+                kick::set_kickcfg_experimental(on);
+                log(&format!("[{}] kickcfg_exp {}", m, parts[1]));
+                "done"
+            } else {
+                log(&format!("[{}] kickcfg_exp on|off", m));
+                "usage"
+            }
+        }
+        Some(&"antikick_exp") => {
+            if parts.len() >= 2 && (parts[1] == "on" || parts[1] == "off") {
+                let on = parts[1] == "on";
+                antikick::set_experimental(on);
+                log(&format!("[{}] antikick_exp {}", m, parts[1]));
+                "done"
+            } else {
+                log(&format!("[{}] antikick_exp on|off", m));
+                "usage"
+            }
+        }
+        Some(&"setid") => {
+            if parts.len() >= 2 {
+                let id = std::ffi::CString::new(parts[1]).unwrap_or_default();
+                // ponytail: into_raw 泄漏 — 每次 setid 泄漏一份字符串 (进程级工具, 可接受);
+                // 需释放时: 保存旧 ptr, CString::from_raw 重建后 drop
+                let ptr = id.into_raw();
+                MY_ID.store(ptr as u64, Ordering::Relaxed);
+                log(&format!("[{}] MY_ID set: {}", m, parts[1]));
+                "done"
+            } else {
+                log(&format!("[{}] setid <hex>", m));
+                "usage"
+            }
+        }
+        Some(&"antikick_on") => {
+            ANTIKICK.store(true, Ordering::Relaxed);
+            antikick::install();
+            antikick::set_enabled(true);
+            log(&format!("[{}] antikick ON", m));
+            "done"
+        }
+        Some(&"antikick_off") => {
+            ANTIKICK.store(false, Ordering::Relaxed);
+            antikick::set_enabled(false);
+            log(&format!("[{}] antikick OFF", m));
+            "done"
+        }
+        Some(&"state") => {
+            sdk::check_handle();
+            log(&format!(
+                "[{}] STATE sdk=0x{:X} handle=0x{:X} lobby=0x{:X} myid=0x{:X} antikick={}",
+                m,
+                SDK_BASE.load(Ordering::Relaxed),
+                MP_HANDLE.load(Ordering::Relaxed),
+                kick::lobby_handle(),
+                MY_ID.load(Ordering::Relaxed),
+                ANTIKICK.load(Ordering::Relaxed)
+            ));
+            log(&format!("[{}] LOBBY_SOURCES: {}", m, kick::lobby_sources()));
+            "done"
+        }
+        Some(&"unload") => {
+            // B29: 恢复全部 hook 后自卸载 (游戏无需重启, 下次注入即新代码)
+            // T5: 分阶段日志 — 每步恢复可独立关联证据; 全部恢复后报告 outstanding 近分配
+            log(&format!("[{}] unloading...", m));
+            log(&format!("[{}] unload: kicking hooks...", m));
+            kick::unhook();
+            log(&format!("[{}] unload: antikick hooks...", m));
+            antikick::unhook();
+            log(&format!("[{}] unload: grab hook...", m));
+            sdk::unhook_grab();
+            log(&format!("[{}] unload: telemetry hooks...", m));
+            telemetry::unhook();
+            log(&format!("[{}] unload: hooks restored (all)", m));
+            let n = detour::near_alloc_count();
+            if n > 0 {
+                log(&format!(
+                    "[{}] unload: near allocs outstanding: {} (not freed — see detour.rs ponytail note)",
+                    m, n
+                ));
+            }
+            log(&format!("[{}] unload: cmd thread exiting", m));
+            log(&format!("[{}] RESULT: done", m));
+            let h = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
+                windows_sys::core::w!("gbfr_sdk_dll.dll"),
+            );
+            if !h.is_null() {
+                windows_sys::Win32::System::LibraryLoader::FreeLibraryAndExitThread(h, 0);
+            }
+            return true;
+        }
+        Some(&_) => {
+            log(&format!("[{}] unknown cmd", m));
+            "unknown"
+        }
+        None => {
+            log(&format!("[{}] no command", m));
+            "usage"
+        }
+    };
+    log(&format!("[{}] RESULT: {}", m, result));
+    false
 }
 
 // 命令处理线程
 unsafe extern "system" fn cmd_thread(_p: *mut core::ffi::c_void) -> u32 {
     use std::io::Read;
     log("[dll] cmd thread started");
-    let mut last = String::new();
+    let mut seen = HashSet::new();
     loop {
+        // T10: 轮询异步入房 out-param 槽 (两次静态检查, 极廉) — 抓到 lobby handle 即 one-shot 存 LOBBY_JOIN
+        kick::poll_join_out();
+        // T1: 被动 telemetry (幂等, 门控不过/已装即静默早退) — MP_HANDLE 抓到 (grab 已恢复) 后才装
+        telemetry::install();
         std::thread::sleep(std::time::Duration::from_millis(200));
         let mut s = String::new();
         if let Ok(mut f) = std::fs::File::open(CMD_FILE) {
             if f.read_to_string(&mut s).is_ok() {
-                let s = s.trim().to_string();
-                if !s.is_empty() && s != last {
-                    last = s.clone();
-                    log(&format!("[dll] CMD: {}", s));
-                    let parts: Vec<&str> = s.split_whitespace().collect();
-                    match parts[0] {
-                        "scan" => scan::do_scan(),
-                        "kick" => {
-                            if parts.len() >= 2 {
-                                kick::do_kick(parts[1]);
-                            } else {
-                                log("[dll] kick <id>");
-                            }
+                for raw in s.lines() {
+                    let line = raw.trim();
+                    if let Some((runid, parts)) = parse_cmd_line(line) {
+                        if line_is_new(line, &mut seen) && dispatch(line, runid, &parts) {
+                            return 0;
                         }
-                        "setid" => {
-                            if parts.len() >= 2 {
-                                let id = std::ffi::CString::new(parts[1]).unwrap_or_default();
-                                // ponytail: into_raw 泄漏 — 每次 setid 泄漏一份字符串 (进程级工具, 可接受);
-                                // 需释放时: 保存旧 ptr, CString::from_raw 重建后 drop
-                                let ptr = id.into_raw();
-                                MY_ID.store(ptr as u64, Ordering::Relaxed);
-                                log(&format!("[dll] MY_ID set: {}", parts[1]));
-                            }
-                        }
-                        "antikick_on" => {
-                            ANTIKICK.store(true, Ordering::Relaxed);
-                            antikick::install();
-                            antikick::set_enabled(true);
-                            log("[dll] antikick ON");
-                        }
-                        "antikick_off" => {
-                            ANTIKICK.store(false, Ordering::Relaxed);
-                            antikick::set_enabled(false);
-                            log("[dll] antikick OFF");
-                        }
-                        "state" => {
-                            sdk::check_handle();
-                            log(&format!(
-                                "[dll] STATE sdk=0x{:X} handle=0x{:X} lobby=0x{:X} myid=0x{:X} antikick={}",
-                                SDK_BASE.load(Ordering::Relaxed),
-                                MP_HANDLE.load(Ordering::Relaxed),
-                                kick::lobby_handle(),
-                                MY_ID.load(Ordering::Relaxed),
-                                ANTIKICK.load(Ordering::Relaxed)
-                            ));
-                        }
-                        _ => log("[dll] unknown cmd"),
                     }
                 }
             }
@@ -113,4 +263,72 @@ pub unsafe extern "system" fn DllMain(_h: *mut core::ffi::c_void, reason: u32, _
         CreateThread(std::ptr::null(), 0, Some(cmd_thread), std::ptr::null_mut(), 0, &mut tid);
     }
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_with_and_without_runid() {
+        let (id, toks) = parse_cmd_line("#001 state").unwrap();
+        assert_eq!(id, Some(1));
+        assert_eq!(toks, ["state"]);
+        let (id, toks) = parse_cmd_line("kick 3").unwrap();
+        assert_eq!(id, None);
+        assert_eq!(toks, ["kick", "3"]);
+        let (id, toks) = parse_cmd_line("  #7 scan  ").unwrap();
+        assert_eq!(id, Some(7));
+        assert_eq!(toks, ["scan"]);
+    }
+
+    #[test]
+    fn empty_and_malformed_lines_are_ignored() {
+        assert_eq!(parse_cmd_line(""), None);
+        assert_eq!(parse_cmd_line("   "), None);
+        assert_eq!(parse_cmd_line("\t"), None);
+        assert_eq!(parse_cmd_line("#abc state"), None);
+    }
+
+    #[test]
+    fn different_runids_both_execute() {
+        let mut seen = HashSet::new();
+        assert!(line_is_new("#001 state", &mut seen));
+        assert!(line_is_new("#002 state", &mut seen));
+        assert_eq!(parse_cmd_line("#001 state").unwrap().1, ["state"]);
+        assert_eq!(parse_cmd_line("#002 state").unwrap().1, ["state"]);
+    }
+
+    #[test]
+    fn exact_same_line_never_executes_twice() {
+        let mut seen = HashSet::new();
+        assert!(line_is_new("#001 state", &mut seen));
+        assert!(!line_is_new("#001 state", &mut seen));
+        assert!(!line_is_new("#001 state", &mut seen));
+    }
+
+    #[test]
+    fn no_runid_warns_and_executes_once() {
+        assert_eq!(marker(None), "no-runid");
+        assert_eq!(marker(Some(1)), "#001");
+        let mut seen = HashSet::new();
+        assert!(line_is_new("state", &mut seen));
+        assert!(!line_is_new("state", &mut seen));
+    }
+
+    #[test]
+    fn empty_input_does_nothing() {
+        assert_eq!(parse_cmd_line(""), None);
+        let mut seen = HashSet::new();
+        assert!(!line_is_new("", &mut seen));
+        assert!(!line_is_new("   ", &mut seen));
+        assert!(seen.is_empty());
+    }
+
+    #[test]
+    fn ts_formats_utc() {
+        assert_eq!(ts_from_secs(0), "1970-01-01T00:00:00Z");
+        assert_eq!(ts_from_secs(1_786_406_400), "2026-08-11T00:00:00Z");
+        assert_eq!(marker(Some(123_456)), "#123456");
+    }
 }

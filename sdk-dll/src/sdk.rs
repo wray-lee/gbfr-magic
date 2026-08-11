@@ -15,11 +15,38 @@ pub static mut FN_FORCE_REMOVE: usize = 0;
 pub static mut FN_GET_LOBBY_ID: usize = 0;
 pub static mut FN_GET_MEMBERS: usize = 0;
 pub static mut FN_POST_UPDATE: usize = 0;
+// T9: 自动 lobby 捕获源 (B9 动态证据: 房内游戏持续轮询这些 accessor, rcx = lobby handle)
+pub static mut FN_GET_OWNER: usize = 0;
+pub static mut FN_GET_MEMBER_PROPERTY: usize = 0;
+pub static mut FN_GET_LOBBY_PROPERTY: usize = 0;
+pub static mut FN_GET_CONN_STRING: usize = 0;
+pub static mut FN_GET_MEMBER_CONN_STATUS: usize = 0;
+// T10: 官方异步入房入口 (out-param 槽捕获) — 签名 v1.8.0 header 验证, 见 kick.rs 汇编 stub
+pub static mut FN_JOIN_LOBBY: usize = 0;
+pub static mut FN_CREATE_JOIN: usize = 0;
+// T1: 原生踢人链路 (memberToDelete → PFLobbyLeave), telemetry 被动记录
+pub static mut FN_LEAVE: usize = 0;
+
+// 游戏 exe 内函数 (B29 最终: 踢人 config 构建点 0x3B4CD8D — mov [rbp-0x48],rdi; rdi=目标成员 id,
+// 随后 lea rax,[rbp-0x48] 放入 config → PFLobbyPostUpdate (IAT thunk 0x49AD690);
+// hook 此点改写 rdi 即替换踢人目标。ForceRemoveMember 路径 (0x49AD720) 实测不触发, 弃用)
+pub static mut GAME_KICK_CONFIG: usize = 0;
 
 pub fn sdk_base() -> u64 {
     unsafe {
         let h = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
             windows_sys::core::w!("PlayFabMultiplayerWin.dll"),
+        );
+        if h.is_null() { return 0; }
+        h as u64
+    }
+}
+
+// 游戏 exe 基址 (KICK_EXEC 调用需要)
+pub fn game_base() -> u64 {
+    unsafe {
+        let h = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
+            windows_sys::core::w!("granblue_fantasy_relink.exe"),
         );
         if h.is_null() { return 0; }
         h as u64
@@ -55,11 +82,29 @@ pub fn init() {
         FN_GET_LOBBY_ID = resolve("PFLobbyGetLobbyId");
         FN_GET_MEMBERS = resolve("PFLobbyGetMembers");
         FN_POST_UPDATE = resolve("PFLobbyPostUpdate");
-        let (f_find, f_start, f_finish, f_force, f_getid, f_members, f_post) =
-            (FN_FIND_LOBBIES, FN_START_PROCESSING, FN_FINISH_PROCESSING, FN_FORCE_REMOVE, FN_GET_LOBBY_ID, FN_GET_MEMBERS, FN_POST_UPDATE);
+        FN_GET_OWNER = resolve("PFLobbyGetOwner");
+        FN_GET_MEMBER_PROPERTY = resolve("PFLobbyGetMemberProperty");
+        FN_GET_LOBBY_PROPERTY = resolve("PFLobbyGetLobbyProperty");
+        FN_GET_CONN_STRING = resolve("PFLobbyGetConnectionString");
+        FN_GET_MEMBER_CONN_STATUS = resolve("PFLobbyGetMemberConnectionStatus");
+        FN_JOIN_LOBBY = resolve("PFMultiplayerJoinLobby");
+        FN_CREATE_JOIN = resolve("PFMultiplayerCreateAndJoinLobby");
+        FN_LEAVE = resolve("PFLobbyLeave");
+        let g = game_base();
+        if g != 0 {
+            GAME_KICK_CONFIG = (g + 0x3B4CD8D) as usize;
+            log(&format!("[sdk] game=0x{:X} KICKCFG=0x{:X}", g, GAME_KICK_CONFIG));
+        } else {
+            log("[sdk] game exe not loaded (KICKCFG unavailable)");
+        }
+        let (f_find, f_start, f_finish, f_force, f_getid, f_members, f_post, f_owner, f_getmp, f_getlp, f_conn, f_memconn, f_join, f_createjoin, f_leave) = (
+            FN_FIND_LOBBIES, FN_START_PROCESSING, FN_FINISH_PROCESSING, FN_FORCE_REMOVE, FN_GET_LOBBY_ID, FN_GET_MEMBERS, FN_POST_UPDATE,
+            FN_GET_OWNER, FN_GET_MEMBER_PROPERTY, FN_GET_LOBBY_PROPERTY, FN_GET_CONN_STRING, FN_GET_MEMBER_CONN_STATUS,
+            FN_JOIN_LOBBY, FN_CREATE_JOIN, FN_LEAVE,
+        );
         log(&format!(
-            "[sdk] find=0x{:X} start=0x{:X} finish=0x{:X} force=0x{:X} getid=0x{:X} members=0x{:X} post=0x{:X}",
-            f_find, f_start, f_finish, f_force, f_getid, f_members, f_post
+            "[sdk] find=0x{:X} start=0x{:X} finish=0x{:X} force=0x{:X} getid=0x{:X} members=0x{:X} post=0x{:X} owner=0x{:X} getmp=0x{:X} getlp=0x{:X} conn=0x{:X} memconn=0x{:X} join=0x{:X} createjoin=0x{:X} leave=0x{:X}",
+            f_find, f_start, f_finish, f_force, f_getid, f_members, f_post, f_owner, f_getmp, f_getlp, f_conn, f_memconn, f_join, f_createjoin, f_leave
         ));
     }
 }
@@ -78,10 +123,14 @@ pub fn install_grab_handle() -> bool {
             return false;
         }
         // B20: hook 区域 = 6 字节 (完整指令边界, 2026-08-11 文件字节验证)
+        // T2: 预检 — target 必须在 PlayFabMultiplayerWin.dll 模块范围内, 否则不装
+        if !detour::preflight(sp, "PlayFabMultiplayerWin.dll", detour::module_range("PlayFabMultiplayerWin.dll")) {
+            return false;
+        }
         match detour::install_capture(sp, 6) {
             Some(h) => {
                 GRAB_HOOK = Box::into_raw(Box::new(h));
-                log("[sdk] grab hook installed on StartProcessing");
+                log("[sdk] grab hook installed on StartProcessing (module=PlayFabMultiplayerWin.dll)");
                 true
             }
             None => {
@@ -100,9 +149,30 @@ pub fn check_handle() {
         let v = (*GRAB_HOOK).saved();
         if v != 0 {
             MP_HANDLE.store(v, Ordering::Relaxed);
-            log(&format!("[sdk] grabbed PFMultiplayerHandle=0x{:X}", v));
+            log(&format!(
+                "[sdk] grabbed PFMultiplayerHandle=0x{:X} (invocations={})",
+                v,
+                (*GRAB_HOOK).counts()
+            ));
             (*GRAB_HOOK).restore();
             log("[sdk] grab hook restored");
         }
+    }
+}
+
+// B29: unload 时恢复 grab hook (若尚未抓到)
+// T5: 幂等 — 二次调用 (GRAB_HOOK 已空) → no-op 日志; Box::from_raw 恰好一次 (install 时 into_raw)
+pub fn unhook_grab() {
+    unsafe {
+        if GRAB_HOOK.is_null() {
+            log("[sdk] grab hook already unhooked");
+            return;
+        }
+        if MP_HANDLE.load(Ordering::Relaxed) == 0 {
+            (*GRAB_HOOK).restore();
+        }
+        let _ = Box::from_raw(GRAB_HOOK);
+        GRAB_HOOK = std::ptr::null_mut();
+        log("[sdk] grab hook freed");
     }
 }
