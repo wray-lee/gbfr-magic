@@ -25,12 +25,61 @@
 //     (保存 lobbyId+password 后重新加入) — 未来工作, 未实现
 // (c) 证据等级: B18.4 静态设计未动态验证; B15 动态矛盾 (被踢判定在 SDK 内部);
 //     B29 动态崩溃 (启用防踢 + 被踢 → 闪退) — 故默认禁用, 需显式 antikick_exp on
+//
+// T2 (two-path model, 见 plan T2/T4 与 learnings.md):
+// - 原生 UI 踢人路径: 游戏侧 PostUpdate/memberToDelete 决策 (native_instr)
+//   → 本机 PFLobbyLeave (local_leave) — 唯一可考虑抑制的路径
+// - 官方路径: PFLobbyForceRemoveMember → MemberRemoved change (official_member_removed)
+//   — 服务器权威, 不可预防, 不做任何抑制
+// - 旧 SDK_MEMBER_REMOVED_FACTORY (0x63C90) null-return 实验永远隔离 (B29 崩溃),
+//   仅作为历史保留: 不启用、不扩展、不解除 (install surface 原样留存)
 use crate::detour;
 use crate::sdk::sdk_base;
 use crate::{log, MY_ID};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const SDK_MEMBER_REMOVED_FACTORY: u64 = 0x63C90;
+
+// ===== T2: 踢人路径分类 (纯函数, 无副作用; T3 将由 telemetry 实时证据喂入) =====
+// 两条独立路径 (native_instr/local_leave/official_member_removed 三信号):
+// - 原生: 游戏侧 PostUpdate/memberToDelete 决策 → 本机 PFLobbyLeave — 唯一可抑制路径
+// - 官方: PFLobbyForceRemoveMember → MemberRemoved change — 服务器权威, 不可预防
+// 规则 (plan T2, 编码进表): 官方信号优先且绝不标原生成功 (混合 → Inconclusive);
+// 有原生指令即原生路径 (Leave 可能已被抑制或尚未发生); 缺席 Leave 单独 ≠ 成功
+// cdylib 不导出 pub 项 → 非测试构建视为 dead; T3 将由 telemetry 消费, 显式豁免
+#[allow(dead_code)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum KickPath {
+    None,
+    NativeInstructionObserved,
+    LocalLeaveObserved,
+    OfficialMemberRemovedObserved,
+    Inconclusive,
+}
+
+#[allow(dead_code)]
+pub fn classify_kick_path(native_instr: bool, local_leave: bool, official_member_removed: bool) -> KickPath {
+    if official_member_removed {
+        if native_instr {
+            KickPath::Inconclusive
+        } else {
+            KickPath::OfficialMemberRemovedObserved
+        }
+    } else if native_instr {
+        KickPath::NativeInstructionObserved
+    } else if local_leave {
+        KickPath::LocalLeaveObserved
+    } else {
+        KickPath::Inconclusive
+    }
+}
+
+// T2: 抑制许可 — 仅原生指令路径可抑制; 官方/本地 Leave/None/Inconclusive 一律 false
+// (官方 ForceRemoveMember 不可预防; 混合信号绝不当作原生成功)
+#[allow(dead_code)]
+pub fn may_suppress(path: KickPath) -> bool {
+    path == KickPath::NativeInstructionObserved
+}
 
 // T6: 实验开关 — 默认 false (硬性默认关闭, B29 崩溃隔离);
 // 仅控制 install() 的安装许可 + set_enabled 的 0 强制 (stub 内运行时闸门仍是 gbfr_ak_enabled)
@@ -294,5 +343,49 @@ mod tests {
         assert!(!ptr_safe(0x10000, false));
         assert!(ptr_safe(0x10000, true));
         assert!(ptr_safe(0x7FFF_FFFF_FFFF, true));
+    }
+
+    // ===== T2: 路径分类 =====
+    #[test]
+    fn classify_exhaustive_table() {
+        // 全 8 组合: 规则表每行 + all-false + 全部 2-of-3 组合
+        assert_eq!(classify_kick_path(false, false, false), KickPath::Inconclusive);
+        assert_eq!(classify_kick_path(true, false, false), KickPath::NativeInstructionObserved);
+        assert_eq!(classify_kick_path(false, true, false), KickPath::LocalLeaveObserved);
+        assert_eq!(classify_kick_path(true, true, false), KickPath::NativeInstructionObserved);
+        assert_eq!(classify_kick_path(false, false, true), KickPath::OfficialMemberRemovedObserved);
+        assert_eq!(classify_kick_path(true, false, true), KickPath::Inconclusive);
+        assert_eq!(classify_kick_path(false, true, true), KickPath::OfficialMemberRemovedObserved);
+        assert_eq!(classify_kick_path(true, true, true), KickPath::Inconclusive);
+    }
+
+    #[test]
+    fn may_suppress_only_native() {
+        // 仅 NativeInstructionObserved 可抑制; None/本地 Leave/官方/不确定 全部 false
+        assert!(may_suppress(KickPath::NativeInstructionObserved));
+        assert!(!may_suppress(KickPath::None));
+        assert!(!may_suppress(KickPath::LocalLeaveObserved));
+        assert!(!may_suppress(KickPath::OfficialMemberRemovedObserved));
+        assert!(!may_suppress(KickPath::Inconclusive));
+    }
+
+    #[test]
+    fn official_signal_never_suppressible() {
+        // 文档规则: 官方信号存在 → 无论其他信号如何, 绝不产生可抑制结论 (不可预防)
+        for n in [false, true] {
+            for l in [false, true] {
+                assert!(!may_suppress(classify_kick_path(n, l, true)));
+            }
+        }
+    }
+
+    #[test]
+    fn absence_of_leave_alone_is_not_success() {
+        // 文档规则: 只有 "没走 Leave" 而无其他信号 → Inconclusive, 不可抑制
+        assert!(!may_suppress(classify_kick_path(false, false, false)));
+        // 部分/混合信号 (2-of-3) 不得标原生成功
+        assert!(!may_suppress(classify_kick_path(false, true, true)));
+        assert!(!may_suppress(classify_kick_path(true, false, true)));
+        assert!(!may_suppress(classify_kick_path(true, true, true)));
     }
 }
