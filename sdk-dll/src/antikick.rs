@@ -36,7 +36,7 @@
 use crate::detour;
 use crate::sdk::sdk_base;
 use crate::{log, MY_ID};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const SDK_MEMBER_REMOVED_FACTORY: u64 = 0x63C90;
 
@@ -302,32 +302,38 @@ pub fn install() {
 
 // ===== NATIVE GUARD (T4) — game-side decision override, independent of the SDK-side
 // 0x63C90 experiment above; plan gbfr-kick-message-interception T4 =====
-// 决策边界 (T3 静态证据 task-3-static-localization.md, orchestrator byte-verified):
-// observer[6] 0x143B48030 (PostUpdateCompleted) 内 call selfcheck @ 0x143B488A3
-//   (E8 48 6A FF FF = call 0x143B3F2F0), 仅在 memcmp("id_container") 门
-//   @ 0x143B48887 (E8 D4 2A E6 00) 通过后可达; 调用后 test al,al @ 0x143B488A8,
-//   jne 0x143B488B1 (0F 85 51 FF FF FF): al=1 → 自己仍在成员列表 → 未被踢 (继续 change 循环);
-//   al=0 (fall-through) → 被踢反应 (按 id_container 值重建成员列表 + 通知) → 后续触发 Leave。
-// selfcheck (vtable[34], 序言 56 57 53 48 83 EC 20) 返回 al=1 iff 容器成员列表
-//   [container+0x180..0x188] 仍含全局 self id。
-// 机制: 5 字节 E9 far-stub @ game_base+0x3B488A3 — stub 调 REAL selfcheck (绝对地址
-//   game_base+0x3B3F2F0, 存 DLL 全局槽), enabled && al==0 → 改 al=1 (假装仍在列表),
-//   直接 jmp 回 game_base+0x3B488A8 (back 槽); trampoline 不使用。
-// 版本绑定 (多点多签名, ALL 必须匹配否则 REFUSED 零补丁): target/jne/memcmp/selfcheck 四处。
+// 决策边界 (2026-08-12 live 证据 retarget): 被踢方客户端从不执行 observer[6]
+// (PostUpdateCompleted, case 8) — 被踢方不调 PostUpdate (getlp/post/getid 计数为 0)。
+// 被踢方真实路径: host PostUpdate(id_container) → 服务器广播 Updated (case 7) →
+// observer 0x143B4B300 → key-match 门 @ 0x143B4B5BA: call 0x1449AB360 (game 自带
+//   memcmp, E8 A1 FD E5 00, r8=len) 比较 change 的 property key 与目标 key;
+//   test eax,eax @ 0x143B4B5BF; jne 0x143B4B799 @ 0x143B4B5C1 (key 不同 → 跳过通知);
+//   fall-through (匹配) → cmp rbx,r12 @ 0x143B4B5C7 (长度检查) → 通知 → 被踢 UI → Leave。
+// 机制: 5 字节 E9 far-stub @ game_base+0x3B4B5BA — stub 调 REAL memcmp
+//   (game_base+0x49AB360, DLL 全局槽 gbfr_ak2_real), enabled && 匹配 (eax==0)
+//   → eax=1 (假装 key 不同 → jne 跳过通知块 → 游戏永远不知 id_container 变化),
+//   jmp 回 game_base+0x3B4B5BF (back 槽 = test eax,eax); trampoline 不使用。
+// 版本绑定 (5 点签名, ALL 必须匹配否则 REFUSED 零补丁):
+//   target/test/jne/len/str; 0x3B4B5C7 实为 cmp rbx,r12 (4C 39 E3, capstone 验证,
+//   与最初假设的 48 83 FB 0C 不同 — 以实际字节为准)。
 // 默认关闭, off/unload 幂等且逐字节恢复 (detour Hook::restore 自带字节校验)。
-const AK2_CALL_RVA: u64 = 0x3B488A3;   // call selfcheck 指令
-const AK2_SELFCHECK_RVA: u64 = 0x3B3F2F0; // selfcheck 函数 (vtable[34])
-const AK2_JNE_RVA: u64 = 0x3B488B1;   // test al,al 后的 jne (self 在列表 → 未踢)
-const AK2_MEMCMP_RVA: u64 = 0x3B48887; // memcmp("id_container", key) 门
-const AK2_SIG_TARGET: [u8; 5] = [0xE8, 0x48, 0x6A, 0xFF, 0xFF];
-const AK2_SIG_JNE: [u8; 6] = [0x0F, 0x85, 0x51, 0xFF, 0xFF, 0xFF];
-const AK2_SIG_MEMCMP: [u8; 5] = [0xE8, 0xD4, 0x2A, 0xE6, 0x00];
-const AK2_SIG_SELFCHECK: [u8; 7] = [0x56, 0x57, 0x53, 0x48, 0x83, 0xEC, 0x20];
-const AK2_SIGS: [(u64, &[u8]); 4] = [
+const AK2_CALL_RVA: u64 = 0x3B4B5BA;   // call memcmp (key-match 门)
+const AK2_MEMCMP_RVA: u64 = 0x49AB360; // game 自带 memcmp (call 目标, 槽值)
+const AK2_TEST_RVA: u64 = 0x3B4B5BF;   // memcmp 后 test eax,eax (back 点)
+const AK2_JNE_RVA: u64 = 0x3B4B5C1;   // key 不同 → 跳过通知 (jne 0x3B4B799)
+const AK2_LEN_RVA: u64 = 0x3B4B5C7;   // cmp rbx,r12 (匹配路径长度检查)
+const AK2_STR_RVA: u64 = 0x61D4690;   // "id_container" 目标 key 字符串
+const AK2_SIG_TARGET: [u8; 5] = [0xE8, 0xA1, 0xFD, 0xE5, 0x00];
+const AK2_SIG_TEST: [u8; 2] = [0x85, 0xC0];
+const AK2_SIG_JNE: [u8; 6] = [0x0F, 0x85, 0xD2, 0x01, 0x00, 0x00];
+const AK2_SIG_LEN: [u8; 3] = [0x4C, 0x39, 0xE3];
+const AK2_SIG_STR: [u8; 12] = *b"id_container";
+const AK2_SIGS: [(u64, &[u8]); 5] = [
     (AK2_CALL_RVA, &AK2_SIG_TARGET),
+    (AK2_TEST_RVA, &AK2_SIG_TEST),
     (AK2_JNE_RVA, &AK2_SIG_JNE),
-    (AK2_MEMCMP_RVA, &AK2_SIG_MEMCMP),
-    (AK2_SELFCHECK_RVA, &AK2_SIG_SELFCHECK),
+    (AK2_LEN_RVA, &AK2_SIG_LEN),
+    (AK2_STR_RVA, &AK2_SIG_STR),
 ];
 
 // 纯决策 (单测): E9 hook (len=5) 的返回地址 = target + 5 (完整指令后的下一指令)
@@ -335,38 +341,51 @@ const fn back_addr(target: u64) -> u64 {
     target + 5
 }
 
-const AK2_BACK_RVA: u64 = back_addr(AK2_CALL_RVA); // 0x3B488A8 (test al,al)
+const AK2_BACK_RVA: u64 = back_addr(AK2_CALL_RVA); // 0x3B4B5BF (test eax,eax)
 
-// T4 stub (汇编, 位于本 DLL 内; detour::install_far 近块 → 跳到这里):
-// 入口 rsp%16=8 (caller call 压栈); push rcx (→0) 保存容器; sub rsp,0x20 (→0) shadow space;
-//   [rsp+0x20] 取回原 rcx; xor edx,edx (与 caller 原参数一致: selfcheck(container, 0));
-//   call [gbfr_ak2_real]; 然后 enabled && al==0 → mov al,1; restore: add/pop 恢复入口
-//   rsp%16=8 后 jmp [gbfr_ak2_back] 直回 0x143B488A8 (tramp 不用)。
-// 寄存器破坏集 = 仅 volatile (rax,rcx,rdx,flags) — 与原始 call 一致; caller 只重测 al,
-//   后续仅用非 volatile 寄存器 (r12/r13/r15/rbx/rbp/rsi/rdi 均未触碰)。
-// fail-closed: gbfr_ak2_real==0 (理论不可达 — 槽先于 patch 写入, unload 后才清) → al=0
-//   原流程 (不覆盖); 预清 eax 保证该路径 al 确定性。
+// T4 retarget stub (汇编, 位于本 DLL 内; detour::install_far 近块 → 跳到这里):
+// 被 hook 的是 memcmp(rcx=key1, rdx=key2, r8=len) 调用点; stub 语义:
+//   real==0 → eax=0 (fail-closed); 否则调 REAL memcmp; enabled && 匹配 (eax==0)
+//   → eax=1 (jne 跳过通知块 → 无被踢 UI → 无 Leave)。
+// 栈对齐: 入口 rsp%16=8; 3×push (0x18) → 8-24=-16≡0; sub 0x20 (→0); call ✓;
+//   restore: add 0x20 → pop r8/rdx/rcx (逆序) → jmp [gbfr_ak2_back]。
+// 保存参数偏移 (push 序: rcx 最先进栈 → 最高地址): 原 rcx=[rsp+0x30],
+//   rdx=[rsp+0x28], r8=[rsp+0x20] (相对 sub 后 rsp); 调用前重载。
+// 诊断: 仅匹配时 (memcmp==0) 调 gbfr_ak2_diag_peek (Rust, 预算 8/run, ptr 守卫,
+//   两 key 可打印 ASCII → hex 日志); 破坏集仅 volatile (rax/rcx/rdx/r8/flags)。
 core::arch::global_asm!(
     r#"
     .text
     .global gbfr_ak2_stub
 gbfr_ak2_stub:
     push rcx
+    push rdx
+    push r8
     sub rsp, 0x20
-    mov rcx, qword ptr [rsp + 0x20]
-    xor edx, edx
     xor eax, eax
     mov rax, qword ptr [rip + gbfr_ak2_real]
     test rax, rax
     je gbfr_ak2_restore
+    mov rcx, qword ptr [rsp + 0x30]
+    mov rdx, qword ptr [rsp + 0x28]
+    mov r8, qword ptr [rsp + 0x20]
     call rax
+    test eax, eax
+    jne gbfr_ak2_no_diag
+    mov rcx, qword ptr [rsp + 0x30]
+    mov rdx, qword ptr [rsp + 0x28]
+    call gbfr_ak2_diag_peek
+    xor eax, eax
+gbfr_ak2_no_diag:
     cmp qword ptr [rip + gbfr_ak2_enabled], 0
     je gbfr_ak2_restore
-    test al, al
+    test eax, eax
     jne gbfr_ak2_restore
-    mov al, 1
+    mov eax, 1
 gbfr_ak2_restore:
     add rsp, 0x20
+    pop r8
+    pop rdx
     pop rcx
     jmp qword ptr [rip + gbfr_ak2_back]
     .data
@@ -388,6 +407,45 @@ unsafe extern "C" {
     static mut gbfr_ak2_enabled: u64;
 }
 
+// T4 retarget 诊断: 记录被踢路径上游戏比较的两个 key (预算 8 次/run 防日志风暴;
+// telemetry 已 quarantine, 不复用其预算)。stub 仅在 memcmp 返回 0 (匹配) 后调用 —
+// 出现日志即证明该调用点正比较 id_container。
+// ponytail: 8/run 硬上限按设计, 需要更长/循环记录时再扩
+static AK2_DIAG_BUDGET: AtomicU64 = AtomicU64::new(0);
+
+// 读最多 12 字节: 全部可打印 ASCII (NUL 截断) → hex 字符串; 守卫失败/不可打印 → None
+unsafe fn peek_hex(p: u64) -> Option<String> {
+    if !ptr_safe(p, mem_committed(p as usize)) {
+        return None;
+    }
+    let mut buf = [0u8; 12];
+    std::ptr::copy_nonoverlapping(p as *const u8, buf.as_mut_ptr(), 12);
+    let mut n = 0;
+    for &b in &buf {
+        if b == 0 {
+            break;
+        }
+        if !(b.is_ascii_graphic() || b == b' ') {
+            return None;
+        }
+        n += 1;
+    }
+    Some(buf[..n].iter().map(|b| format!("{:02X}", b)).collect())
+}
+
+// asm 直呼 (call gbfr_ak2_diag_peek); 预算内才读内存+日志
+#[allow(dead_code)]
+#[no_mangle]
+pub unsafe extern "C" fn gbfr_ak2_diag_peek(key1: u64, key2: u64) {
+    if AK2_DIAG_BUDGET.fetch_add(1, Ordering::Relaxed) >= 8 {
+        return;
+    }
+    match (peek_hex(key1), peek_hex(key2)) {
+        (Some(a), Some(b)) => log(&format!("[ak2] keymatch key1={} key2={}", a, b)),
+        _ => {}
+    }
+}
+
 static mut AK2_NEAR: usize = 0;
 static mut HOOK_AK2: *mut detour::Hook = std::ptr::null_mut();
 
@@ -397,9 +455,10 @@ fn guard_install_allowed(game_base: u64, sigs_ok: bool, installed: bool) -> bool
 }
 
 // 纯决策 (单测): stub 内覆盖规则的 Rust 镜像 (asm 实现同一逻辑; 供测试+文档)
+// enabled && memcmp 匹配 (eax==0) → 1 (假装 key 不同 → 跳过通知块); 否则原样
 #[allow(dead_code)]
-fn override_result(enabled: bool, selfcheck_al: u8) -> u8 {
-    if enabled && selfcheck_al == 0 { 1 } else { selfcheck_al }
+fn override_result(enabled: bool, memcmp_eax: u8) -> u8 {
+    if enabled && memcmp_eax == 0 { 1 } else { memcmp_eax }
 }
 
 // 纯决策 (单测): 逐字节签名比较 (长度不等 → false)
@@ -407,7 +466,7 @@ fn sig_match(expected: &[u8], actual: &[u8]) -> bool {
     expected.len() == actual.len() && expected.iter().zip(actual).all(|(e, a)| e == a)
 }
 
-// 版本绑定: 读 game 内存 4 处签名, 全匹配 → None; 否则 Some(首个不匹配 RVA)
+// 版本绑定: 读 game 内存 5 处签名, 全匹配 → None; 否则 Some(首个不匹配 RVA)
 fn verify_sigs(game_base: u64) -> Option<u64> {
     if game_base == 0 {
         return Some(0);
@@ -415,7 +474,7 @@ fn verify_sigs(game_base: u64) -> Option<u64> {
     unsafe {
         for &(rva, expected) in &AK2_SIGS {
             let p = (game_base + rva) as usize;
-            let mut actual = [0u8; 7];
+            let mut actual = [0u8; 16];
             std::ptr::copy_nonoverlapping(p as *const u8, actual.as_mut_ptr(), expected.len());
             if !sig_match(expected, &actual[..expected.len()]) {
                 return Some(rva);
@@ -451,7 +510,7 @@ pub fn native_guard_on() {
             }
             return;
         }
-        std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_real), b + AK2_SELFCHECK_RVA);
+        std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_real), b + AK2_MEMCMP_RVA);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_back), b + AK2_BACK_RVA);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 1);
         match detour::install_far(target, 5, gbfr_ak2_stub as *const () as usize) {
@@ -581,11 +640,12 @@ mod tests {
     // ===== T4: 原生防踢守卫 (fail-closed 纯决策) =====
     #[test]
     fn sig_match_accepts_exact_bytes() {
-        // 全部 4 组版本绑定签名: 自身恒匹配
+        // 全部 5 组版本绑定签名: 自身恒匹配
         assert!(sig_match(&AK2_SIG_TARGET, &AK2_SIG_TARGET));
+        assert!(sig_match(&AK2_SIG_TEST, &AK2_SIG_TEST));
         assert!(sig_match(&AK2_SIG_JNE, &AK2_SIG_JNE));
-        assert!(sig_match(&AK2_SIG_MEMCMP, &AK2_SIG_MEMCMP));
-        assert!(sig_match(&AK2_SIG_SELFCHECK, &AK2_SIG_SELFCHECK));
+        assert!(sig_match(&AK2_SIG_LEN, &AK2_SIG_LEN));
+        assert!(sig_match(&AK2_SIG_STR, &AK2_SIG_STR));
     }
 
     #[test]
@@ -599,22 +659,31 @@ mod tests {
 
     #[test]
     fn sig_match_rejects_each_byte_flip() {
-        // 每个字节翻转都必须拒收 (多字节签名任一不符 → REFUSED)
-        for i in 0..AK2_SIG_TARGET.len() {
-            let mut bad = AK2_SIG_TARGET.clone();
-            bad[i] ^= 0xFF;
-            assert!(!sig_match(&AK2_SIG_TARGET, &bad), "target byte {} must matter", i);
-        }
-        for i in 0..AK2_SIG_SELFCHECK.len() {
-            let mut bad = AK2_SIG_SELFCHECK.clone();
-            bad[i] ^= 0x01;
-            assert!(!sig_match(&AK2_SIG_SELFCHECK, &bad), "selfcheck byte {} must matter", i);
+        // 每个签名每个字节翻转都必须拒收 (多字节签名任一不符 → REFUSED)
+        for (rva, sig) in AK2_SIGS {
+            for i in 0..sig.len() {
+                let mut bad = sig.to_vec();
+                bad[i] ^= 0xFF;
+                assert!(!sig_match(sig, &bad), "rva 0x{:X} byte {} must matter", rva, i);
+            }
         }
     }
 
     #[test]
     fn sig_match_empty_arrays() {
         assert!(sig_match(&[], &[]));
+    }
+
+    #[test]
+    fn sig_table_consistent() {
+        // 5 点签名表: 每项字节数 ≥ 2 且 RVA 互异 (安装时逐点独立校验)
+        let mut rvas: Vec<u64> = Vec::new();
+        for &(rva, sig) in &AK2_SIGS {
+            assert!(sig.len() >= 2, "rva 0x{:X} sig too short (len={})", rva, sig.len());
+            assert!(!rvas.contains(&rva), "duplicate rva 0x{:X}", rva);
+            rvas.push(rva);
+        }
+        assert_eq!(AK2_SIGS.len(), 5);
     }
 
     #[test]
@@ -645,7 +714,7 @@ mod tests {
 
     #[test]
     fn override_result_table() {
-        // enabled && al==0 → 1 (假装仍在列表); disabled 或 al==1 → 原样
+        // enabled && memcmp 匹配 (eax==0) → 1 (假装 key 不同); disabled 或非匹配 → 原样
         assert_eq!(override_result(false, 0), 0);
         assert_eq!(override_result(false, 1), 1);
         assert_eq!(override_result(true, 1), 1);
@@ -655,8 +724,8 @@ mod tests {
     #[test]
     fn back_addr_adds_hook_len() {
         assert_eq!(back_addr(0x1234_5678), 0x1234_567D);
-        // 版本绑定常量一致性: call 后下一指令 = back (test al,al)
+        // 版本绑定常量一致性: call 后下一指令 = back (test eax,eax @ 0x3B4B5BF)
         assert_eq!(back_addr(AK2_CALL_RVA), AK2_BACK_RVA);
-        assert_eq!(AK2_BACK_RVA, 0x3B488A8);
+        assert_eq!(AK2_BACK_RVA, 0x3B4B5BF);
     }
 }
