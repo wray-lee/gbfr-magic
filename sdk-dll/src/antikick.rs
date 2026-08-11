@@ -346,13 +346,17 @@ const AK2_BACK_RVA: u64 = back_addr(AK2_CALL_RVA); // 0x3B4B5BF (test eax,eax)
 // T4 retarget stub (汇编, 位于本 DLL 内; detour::install_far 近块 → 跳到这里):
 // 被 hook 的是 memcmp(rcx=key1, rdx=key2, r8=len) 调用点; stub 语义:
 //   real==0 → eax=0 (fail-closed); 否则调 REAL memcmp; enabled && 匹配 (eax==0)
-//   → eax=1 (jne 跳过通知块 → 无被踢 UI → 无 Leave)。
-// 栈对齐: 入口 rsp%16=8; 3×push (0x18) → 8-24=-16≡0; sub 0x20 (→0); call ✓;
+//   → diag peek (经 gbfr_ak2_diag_fn 槽) → eax=1 (jne 跳过通知块 → 无被踢 UI → 无 Leave)。
+//   诊断在 enabled 门之后 — 仅被抑制的踢才烧预算, 正常操作零诊断。
+// 调用规范 (slot-call, house pattern): Rust 函数一律经 .data qword 槽间接调用
+//   (mov rax,[rip+slot]; test rax,rax; je skip; call rax) — 槽先于 patch 写入,
+//   绝不 global_asm 直呼 Rust 符号 (曾致 join 时崩溃, 见 learnings)。
+// 栈对齐: 入口 rsp%16=8; 3×push (0x18) → 8-24=-16≡0; sub 0x20 (→0) — 两次 call
+//   (memcmp / diag) 共享同一 shadow [rsp..rsp+0x20) (顺序复用, 无重叠需求);
 //   restore: add 0x20 → pop r8/rdx/rcx (逆序) → jmp [gbfr_ak2_back]。
 // 保存参数偏移 (push 序: rcx 最先进栈 → 最高地址): 原 rcx=[rsp+0x30],
 //   rdx=[rsp+0x28], r8=[rsp+0x20] (相对 sub 后 rsp); 调用前重载。
-// 诊断: 仅匹配时 (memcmp==0) 调 gbfr_ak2_diag_peek (Rust, 预算 8/run, ptr 守卫,
-//   两 key 可打印 ASCII → hex 日志); 破坏集仅 volatile (rax/rcx/rdx/r8/flags)。
+// 破坏集仅 volatile (rax/rcx/rdx/r8/flags)。
 core::arch::global_asm!(
     r#"
     .text
@@ -370,17 +374,17 @@ gbfr_ak2_stub:
     mov rdx, qword ptr [rsp + 0x28]
     mov r8, qword ptr [rsp + 0x20]
     call rax
-    test eax, eax
-    jne gbfr_ak2_no_diag
-    mov rcx, qword ptr [rsp + 0x30]
-    mov rdx, qword ptr [rsp + 0x28]
-    call gbfr_ak2_diag_peek
-    xor eax, eax
-gbfr_ak2_no_diag:
     cmp qword ptr [rip + gbfr_ak2_enabled], 0
     je gbfr_ak2_restore
     test eax, eax
     jne gbfr_ak2_restore
+    mov rcx, qword ptr [rsp + 0x30]
+    mov rdx, qword ptr [rsp + 0x28]
+    mov rax, qword ptr [rip + gbfr_ak2_diag_fn]
+    test rax, rax
+    je gbfr_ak2_suppress
+    call rax
+gbfr_ak2_suppress:
     mov eax, 1
 gbfr_ak2_restore:
     add rsp, 0x20
@@ -398,6 +402,9 @@ gbfr_ak2_back:
     .global gbfr_ak2_enabled
 gbfr_ak2_enabled:
     .quad 0
+    .global gbfr_ak2_diag_fn
+gbfr_ak2_diag_fn:
+    .quad 0
     "#
 );
 unsafe extern "C" {
@@ -405,6 +412,7 @@ unsafe extern "C" {
     static mut gbfr_ak2_real: u64;
     static mut gbfr_ak2_back: u64;
     static mut gbfr_ak2_enabled: u64;
+    static mut gbfr_ak2_diag_fn: u64;
 }
 
 // T4 retarget 诊断: 记录被踢路径上游戏比较的两个 key (预算 8 次/run 防日志风暴;
@@ -433,8 +441,7 @@ unsafe fn peek_hex(p: u64) -> Option<String> {
     Some(buf[..n].iter().map(|b| format!("{:02X}", b)).collect())
 }
 
-// asm 直呼 (call gbfr_ak2_diag_peek); 预算内才读内存+日志
-#[allow(dead_code)]
+// asm 经 gbfr_ak2_diag_fn 槽间接调用 (native_guard_on 写地址); 预算内才读内存+日志
 #[no_mangle]
 pub unsafe extern "C" fn gbfr_ak2_diag_peek(key1: u64, key2: u64) {
     if AK2_DIAG_BUDGET.fetch_add(1, Ordering::Relaxed) >= 8 {
@@ -484,7 +491,7 @@ fn verify_sigs(game_base: u64) -> Option<u64> {
     }
 }
 
-// native_antikick_exp on: 幂等 — 已装则仅 ensure enabled=1; 否则签名门 → 三全局槽
+// native_antikick_exp on: 幂等 — 已装则仅 ensure enabled=1; 否则签名门 → 全局槽
 // 先写 (patch 后 stub 可能即刻被执行, telemetry.rs:283-285 同款) → install_far
 pub fn native_guard_on() {
     unsafe {
@@ -513,6 +520,7 @@ pub fn native_guard_on() {
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_real), b + AK2_MEMCMP_RVA);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_back), b + AK2_BACK_RVA);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 1);
+        std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_diag_fn), gbfr_ak2_diag_peek as *const () as u64);
         match detour::install_far(target, 5, gbfr_ak2_stub as *const () as usize) {
             Some(h) => {
                 std::ptr::write(std::ptr::addr_of_mut!(AK2_NEAR), h.near_addr());
@@ -543,6 +551,7 @@ pub fn native_guard_uninstall() {
         std::ptr::write(std::ptr::addr_of_mut!(AK2_NEAR), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_real), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_back), 0);
+        std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_diag_fn), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 0);
         log("[ak2] native guard removed");
     }
