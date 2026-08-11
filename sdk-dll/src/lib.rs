@@ -135,6 +135,22 @@ unsafe fn dispatch(line: &str, runid: Option<u64>, parts: &[&str]) -> bool {
                 "usage"
             }
         }
+        Some(&"native_antikick_exp") => {
+            // T4: 游戏侧原生自踢决策守卫 (默认关闭, 版本绑定 fail-closed)
+            if parts.len() >= 2 && (parts[1] == "on" || parts[1] == "off") {
+                let on = parts[1] == "on";
+                if on {
+                    antikick::native_guard_on();
+                } else {
+                    antikick::native_guard_uninstall();
+                }
+                log(&format!("[{}] native_antikick_exp {}", m, parts[1]));
+                "done"
+            } else {
+                log(&format!("[{}] native_antikick_exp on|off", m));
+                "usage"
+            }
+        }
         Some(&"setid") => {
             if parts.len() >= 2 {
                 let id = std::ffi::CString::new(parts[1]).unwrap_or_default();
@@ -188,6 +204,8 @@ unsafe fn dispatch(line: &str, runid: Option<u64>, parts: &[&str]) -> bool {
             sdk::unhook_grab();
             log(&format!("[{}] unload: telemetry hooks...", m));
             telemetry::unhook();
+            log(&format!("[{}] unload: native guard...", m));
+            antikick::native_guard_uninstall();
             log(&format!("[{}] unload: hooks restored (all)", m));
             let n = detour::near_alloc_count();
             if n > 0 {
