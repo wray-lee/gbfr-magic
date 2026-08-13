@@ -19,13 +19,33 @@ use crate::antikick::{mem_readable, ptr_safe};
 use crate::detour;
 use crate::sdk::{FN_FINISH_PROCESSING, FN_LEAVE};
 use crate::{log, MP_HANDLE};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 const TEL_BUDGET_CAP: u64 = 64;
 const TEL_CHANGE_COUNT_MAX: u32 = 1024;
 static TEL_BUDGET_USED: AtomicU64 = AtomicU64::new(0);
 static TEL_FINISH_PROBE_USED: AtomicU64 = AtomicU64::new(0);
 const TEL_FINISH_PROBE_CAP: u64 = 16;
+const TEL_LEAVE_RING_CAP: usize = 64;
+
+struct LeaveSlot {
+    ready: AtomicU8,
+    handle: AtomicU64,
+}
+
+impl LeaveSlot {
+    const fn new() -> Self {
+        Self {
+            ready: AtomicU8::new(0),
+            handle: AtomicU64::new(0),
+        }
+    }
+}
+
+static TEL_LEAVE_RING: [LeaveSlot; TEL_LEAVE_RING_CAP] =
+    [const { LeaveSlot::new() }; TEL_LEAVE_RING_CAP];
+static TEL_LEAVE_CURSOR: AtomicUsize = AtomicUsize::new(0);
+static TEL_LEAVE_READY: AtomicBool = AtomicBool::new(false);
 
 // 关注的 state change 类型 (官方 PFLobbyStateChangeType, PFLobby.h:160-216)
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -93,7 +113,12 @@ fn budget_take() -> bool {
         if !budget_allowed(used, TEL_BUDGET_CAP) {
             return false;
         }
-        match TEL_BUDGET_USED.compare_exchange_weak(used, used + 1, Ordering::Relaxed, Ordering::Relaxed) {
+        match TEL_BUDGET_USED.compare_exchange_weak(
+            used,
+            used + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => return true,
             Err(cur) => used = cur,
         }
@@ -101,13 +126,19 @@ fn budget_take() -> bool {
 }
 
 // 安装许可 (纯函数, 单测): handle 已抓 + Finish/Leave 均已解析 + 未安装
-fn tel_install_allowed(handle: u64, finish_resolved: bool, leave_resolved: bool, installed: bool) -> bool {
+fn tel_install_allowed(
+    handle: u64,
+    finish_resolved: bool,
+    leave_resolved: bool,
+    installed: bool,
+) -> bool {
     handle != 0 && finish_resolved && leave_resolved && !installed
 }
 
-// Phase 2C S2: leave-only 安装许可 (纯函数, 单测) — 只要 handle 已抓 + Leave 已解析 + 未装
-fn tel_leave_install_allowed(handle: u64, leave_resolved: bool, installed: bool) -> bool {
-    handle != 0 && leave_resolved && !installed
+// Phase 2C S2 leave-only 安装许可 (纯函数, 单测): Leave 已解析 + 未安装。
+// Leave 的 handle 是该函数本身的 rcx 参数；无需为 S2 额外安装 StartProcessing grab。
+fn tel_leave_install_allowed(leave_resolved: bool, installed: bool) -> bool {
+    leave_resolved && !installed
 }
 
 // ===== far stubs (detour::install_far 从近块跳到这里, 风格镜像 antikick.rs/kick.rs) =====
@@ -210,7 +241,10 @@ static mut HOOK_TEL_LEAVE: *mut detour::Hook = std::ptr::null_mut();
 unsafe extern "system" fn tel_finish_poll(count: u64, changes: u64) {
     let probe = TEL_FINISH_PROBE_USED.fetch_add(1, Ordering::Relaxed);
     if probe < TEL_FINISH_PROBE_CAP {
-        log(&format!("[tel] finish_probe count={} changes=0x{:X}", count, changes));
+        log(&format!(
+            "[tel] finish_probe count={} changes=0x{:X}",
+            count, changes
+        ));
     }
     if !count_in_range(count as u32) || !ptr_safe(changes, mem_readable(changes as usize, 8)) {
         return;
@@ -218,7 +252,9 @@ unsafe extern "system" fn tel_finish_poll(count: u64, changes: u64) {
     let mut kinds: Vec<TelKind> = Vec::new();
     let mut mr_lobbies: Vec<u64> = Vec::new();
     for i in 0..count as usize {
-        let Some(t) = entry_type_guarded(changes, i) else { continue };
+        let Some(t) = entry_type_guarded(changes, i) else {
+            continue;
+        };
         let k = classify_type(t);
         if k == TelKind::Ignore {
             continue;
@@ -228,9 +264,13 @@ unsafe extern "system" fn tel_finish_poll(count: u64, changes: u64) {
         }
         if k == TelKind::MemberRemoved {
             // lobby handle 位于 change+8 (PFLobbyMemberRemovedStateChange 首字段)
-            let Some(slot) = changes.checked_add((i as u64).saturating_mul(8)) else { continue };
+            let Some(slot) = changes.checked_add((i as u64).saturating_mul(8)) else {
+                continue;
+            };
             let p = std::ptr::read_unaligned(slot as *const u64);
-            let Some(lobby_addr) = p.checked_add(8) else { continue };
+            let Some(lobby_addr) = p.checked_add(8) else {
+                continue;
+            };
             if ptr_safe(lobby_addr, mem_readable(lobby_addr as usize, 8)) {
                 mr_lobbies.push(std::ptr::read_unaligned(lobby_addr as *const u64));
             }
@@ -243,7 +283,11 @@ unsafe extern "system" fn tel_finish_poll(count: u64, changes: u64) {
         return;
     }
     let names: Vec<&str> = kinds.iter().map(|k| k.name()).collect();
-    log(&format!("[tel] statechanges n={} types=[{}]", count, names.join(",")));
+    log(&format!(
+        "[tel] statechanges n={} types=[{}]",
+        count,
+        names.join(",")
+    ));
     for &l in &mr_lobbies {
         if budget_take() {
             log(&format!("[tel] memberremoved lobby=0x{:X}", l));
@@ -253,10 +297,42 @@ unsafe extern "system" fn tel_finish_poll(count: u64, changes: u64) {
     }
 }
 
-// PFLobbyLeave 调用记录 (rcx=lobby handle; 仅日志, 零解引用 — handle 可能为 0)
+// PFLobbyLeave 热路径只写固定原子槽。无分配、文件 I/O、锁或 VirtualQuery；
+// cmd worker 调用 drain() 后再格式化与写日志。任意调用线程都可通过 CAS 认领空槽；
+// 环满时丢弃新事件，不阻塞原调用。
 unsafe extern "system" fn tel_leave(handle: u64) {
-    if budget_take() {
-        log(&format!("[tel] PFLobbyLeave handle=0x{:X}", handle));
+    if !TEL_LEAVE_READY.load(Ordering::Acquire) {
+        return;
+    }
+    let start = TEL_LEAVE_CURSOR.fetch_add(1, Ordering::Relaxed) % TEL_LEAVE_RING_CAP;
+    for offset in 0..TEL_LEAVE_RING_CAP {
+        let slot = &TEL_LEAVE_RING[(start + offset) % TEL_LEAVE_RING_CAP];
+        if slot
+            .ready
+            .compare_exchange(0, 2, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            slot.handle.store(handle, Ordering::Relaxed);
+            slot.ready.store(1, Ordering::Release);
+            return;
+        }
+    }
+}
+
+pub fn drain() {
+    for slot in &TEL_LEAVE_RING {
+        if slot
+            .ready
+            .compare_exchange(1, 2, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            continue;
+        }
+        let handle = slot.handle.load(Ordering::Relaxed);
+        slot.ready.store(0, Ordering::Release);
+        if budget_take() {
+            log(&format!("[tel] PFLobbyLeave handle=0x{:X}", handle));
+        }
     }
 }
 
@@ -308,12 +384,24 @@ pub fn install() -> bool {
         let leave = std::ptr::read_unaligned(std::ptr::addr_of!(FN_LEAVE));
         let finish_slot = std::ptr::read(std::ptr::addr_of!(HOOK_TEL_FINISH));
         let leave_slot = std::ptr::read(std::ptr::addr_of!(HOOK_TEL_LEAVE));
-        if !tel_install_allowed(handle, finish != 0, leave != 0, !finish_slot.is_null() || !leave_slot.is_null()) {
+        if !tel_install_allowed(
+            handle,
+            finish != 0,
+            leave != 0,
+            !finish_slot.is_null() || !leave_slot.is_null(),
+        ) {
             return false;
         }
         // fn 槽必须先于 patch 生效 (patch 后 stub 可能即刻被执行)
-        std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_finish_fn), tel_finish_poll as *const () as usize as u64);
-        std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_fn), tel_leave as *const () as usize as u64);
+        std::ptr::write(
+            std::ptr::addr_of_mut!(gbfr_tel_finish_fn),
+            tel_finish_poll as *const () as usize as u64,
+        );
+        std::ptr::write(
+            std::ptr::addr_of_mut!(gbfr_tel_leave_fn),
+            tel_leave as *const () as usize as u64,
+        );
+        TEL_LEAVE_READY.store(true, Ordering::Release);
         let range = detour::module_range("PlayFabMultiplayerWin.dll");
         let mut finish_h = tel_try_install(
             finish,
@@ -345,8 +433,14 @@ pub fn install() -> bool {
             (Some(_), Some(_)) => {
                 let fh = finish_h.take().unwrap();
                 let lh = leave_h.take().unwrap();
-                std::ptr::write(std::ptr::addr_of_mut!(HOOK_TEL_FINISH), Box::into_raw(Box::new(fh)));
-                std::ptr::write(std::ptr::addr_of_mut!(HOOK_TEL_LEAVE), Box::into_raw(Box::new(lh)));
+                std::ptr::write(
+                    std::ptr::addr_of_mut!(HOOK_TEL_FINISH),
+                    Box::into_raw(Box::new(fh)),
+                );
+                std::ptr::write(
+                    std::ptr::addr_of_mut!(HOOK_TEL_LEAVE),
+                    Box::into_raw(Box::new(lh)),
+                );
                 log("[tel] hooks installed (FinishProcessing/Leave)");
                 true
             }
@@ -361,10 +455,16 @@ pub fn install() -> bool {
                 if !rollback_ok {
                     log("[tel] install rollback FAILED — refusing to discard hook ownership");
                     if let Some(h) = finish_h.take() {
-                        std::ptr::write(std::ptr::addr_of_mut!(HOOK_TEL_FINISH), Box::into_raw(Box::new(h)));
+                        std::ptr::write(
+                            std::ptr::addr_of_mut!(HOOK_TEL_FINISH),
+                            Box::into_raw(Box::new(h)),
+                        );
                     }
                     if let Some(h) = leave_h.take() {
-                        std::ptr::write(std::ptr::addr_of_mut!(HOOK_TEL_LEAVE), Box::into_raw(Box::new(h)));
+                        std::ptr::write(
+                            std::ptr::addr_of_mut!(HOOK_TEL_LEAVE),
+                            Box::into_raw(Box::new(h)),
+                        );
                     }
                     return false;
                 }
@@ -372,6 +472,9 @@ pub fn install() -> bool {
                 std::ptr::write(std::ptr::addr_of_mut!(TEL_LEAVE_NEAR), 0);
                 std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_finish_tramp), 0);
                 std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_tramp), 0);
+                TEL_LEAVE_READY.store(false, Ordering::Release);
+                std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_finish_fn), 0);
+                std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_fn), 0);
                 log("[tel] install FAILED (FinishProcessing/Leave) — all hooks rolled back");
                 false
             }
@@ -380,8 +483,8 @@ pub fn install() -> bool {
 }
 
 // Phase 2C S2: leave-only 选择器安装 — 只装 PFLobbyLeave 被动记录 far stub,
-// 不装 FinishProcessing probe (隔离 H2 嫌疑组, 见 phase2c plan §6 S2 细化)。
-// 幂等: handle 未抓 / Leave 未解析 / 已装 → 静默 false; no_telemetry → 永不安装。
+// 不装 grab 或 FinishProcessing probe。
+// 幂等: Leave 未解析 / 已装 → 静默 false; no_telemetry → 永不安装。
 // 与 install() 共享 gbfr_tel_leave_stub / gbfr_tel_leave_tramp / HOOK_TEL_LEAVE / TEL_LEAVE_NEAR,
 // 因此 unhook() 已覆盖 (finish 槽为空 → 跳过, 幂等)。
 pub fn install_leave_only() -> bool {
@@ -390,14 +493,17 @@ pub fn install_leave_only() -> bool {
         return false;
     }
     unsafe {
-        let handle = MP_HANDLE.load(Ordering::Relaxed);
         let leave = std::ptr::read_unaligned(std::ptr::addr_of!(FN_LEAVE));
         let leave_slot = std::ptr::read(std::ptr::addr_of!(HOOK_TEL_LEAVE));
-        if !tel_leave_install_allowed(handle, leave != 0, !leave_slot.is_null()) {
+        if !tel_leave_install_allowed(leave != 0, !leave_slot.is_null()) {
             return false;
         }
-        // fn 槽必须先于 patch 生效 (patch 后 stub 可能即刻被执行)
-        std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_fn), tel_leave as *const () as usize as u64);
+        // fn 槽和 ring 必须先于 patch 生效 (patch 后 stub 可能即刻被执行)
+        std::ptr::write(
+            std::ptr::addr_of_mut!(gbfr_tel_leave_fn),
+            tel_leave as *const () as usize as u64,
+        );
+        TEL_LEAVE_READY.store(true, Ordering::Release);
         match tel_try_install(
             leave,
             7,
@@ -410,11 +516,16 @@ pub fn install_leave_only() -> bool {
         ) {
             Some(h) => {
                 std::ptr::write(std::ptr::addr_of_mut!(TEL_LEAVE_NEAR), h.near_addr());
-                std::ptr::write(std::ptr::addr_of_mut!(HOOK_TEL_LEAVE), Box::into_raw(Box::new(h)));
+                std::ptr::write(
+                    std::ptr::addr_of_mut!(HOOK_TEL_LEAVE),
+                    Box::into_raw(Box::new(h)),
+                );
                 log("[tel] leave-only hook installed (PFLobbyLeave)");
                 true
             }
             None => {
+                TEL_LEAVE_READY.store(false, Ordering::Release);
+                std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_fn), 0);
                 std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_tramp), 0);
                 log("[tel] leave-only install FAILED (rolled back)");
                 false
@@ -426,6 +537,7 @@ pub fn install_leave_only() -> bool {
 // 恢复两个 hook (幂等: 双槽皆空 → no-op 早退; Box::from_raw 恰好一次)
 pub fn unhook() {
     unsafe {
+        TEL_LEAVE_READY.store(false, Ordering::Release);
         let finish = std::ptr::read(std::ptr::addr_of!(HOOK_TEL_FINISH));
         let leave = std::ptr::read(std::ptr::addr_of!(HOOK_TEL_LEAVE));
         if finish.is_null() && leave.is_null() {
@@ -438,7 +550,10 @@ pub fn unhook() {
                 return;
             }
             let _ = Box::from_raw(finish);
-            std::ptr::write(std::ptr::addr_of_mut!(HOOK_TEL_FINISH), std::ptr::null_mut());
+            std::ptr::write(
+                std::ptr::addr_of_mut!(HOOK_TEL_FINISH),
+                std::ptr::null_mut(),
+            );
         }
         if !leave.is_null() {
             if !(*leave).restore() {
@@ -452,6 +567,8 @@ pub fn unhook() {
         std::ptr::write(std::ptr::addr_of_mut!(TEL_LEAVE_NEAR), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_finish_tramp), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_tramp), 0);
+        std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_finish_fn), 0);
+        std::ptr::write(std::ptr::addr_of_mut!(gbfr_tel_leave_fn), 0);
         log("[tel] hooks restored");
     }
 }
@@ -482,7 +599,9 @@ mod tests {
             // 已提交数组但槽值为 0 / 未提交 → 值守卫失败
             let zero_arr = Box::new([0u64; 1]);
             assert_eq!(entry_type_guarded(zero_arr.as_ptr() as u64, 0), None);
-            use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS};
+            use windows_sys::Win32::System::Memory::{
+                VirtualAlloc, VirtualFree, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS,
+            };
             let reserved = VirtualAlloc(std::ptr::null_mut(), 0x1000, MEM_RESERVE, PAGE_NOACCESS);
             assert!(!reserved.is_null());
             let bad_arr = Box::new([reserved as u64; 1]);
@@ -522,22 +641,58 @@ mod tests {
 
     #[test]
     fn leave_only_install_gate_combinations() {
-        // Phase 2C S2: handle 未抓 / Leave 未解析 / 已装 → 拒绝; 仅全过允许
-        assert!(!tel_leave_install_allowed(0, true, false));
-        assert!(!tel_leave_install_allowed(0x100, false, false));
-        assert!(!tel_leave_install_allowed(0x100, true, true));
-        assert!(tel_leave_install_allowed(0x100, true, false));
+        assert!(!tel_leave_install_allowed(false, false));
+        assert!(!tel_leave_install_allowed(true, true));
+        assert!(tel_leave_install_allowed(true, false));
+    }
+
+    fn reset_leave_ring() {
+        TEL_LEAVE_CURSOR.store(0, Ordering::Relaxed);
+        for slot in &TEL_LEAVE_RING {
+            slot.ready.store(0, Ordering::Relaxed);
+            slot.handle.store(0, Ordering::Relaxed);
+        }
     }
 
     #[test]
-    fn leave_handler_logs_and_consumes_budget() {
+    fn leave_handler_queues_without_consuming_log_budget() {
+        TEL_LEAVE_READY.store(false, Ordering::Release);
+        reset_leave_ring();
         TEL_BUDGET_USED.store(0, Ordering::Relaxed);
-        unsafe { tel_leave(0); }
+        unsafe { tel_leave(0x1234) };
+        assert!(TEL_LEAVE_RING
+            .iter()
+            .all(|slot| slot.ready.load(Ordering::Relaxed) == 0));
+
+        TEL_LEAVE_READY.store(true, Ordering::Release);
+        unsafe { tel_leave(0x1234) };
+        let queued = TEL_LEAVE_RING
+            .iter()
+            .find(|slot| slot.ready.load(Ordering::Acquire) == 1)
+            .expect("leave event queued");
+        assert_eq!(queued.handle.load(Ordering::Relaxed), 0x1234);
+        assert_eq!(TEL_BUDGET_USED.load(Ordering::Relaxed), 0);
+
+        drain();
+        assert!(TEL_LEAVE_RING
+            .iter()
+            .all(|slot| slot.ready.load(Ordering::Relaxed) == 0));
         assert_eq!(TEL_BUDGET_USED.load(Ordering::Relaxed), 1);
-        unsafe { tel_leave(0x1234); }
-        assert_eq!(TEL_BUDGET_USED.load(Ordering::Relaxed), 2);
-        TEL_BUDGET_USED.store(TEL_BUDGET_CAP, Ordering::Relaxed);
-        unsafe { tel_leave(0x5678); }
-        assert_eq!(TEL_BUDGET_USED.load(Ordering::Relaxed), TEL_BUDGET_CAP);
+        TEL_LEAVE_READY.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn leave_ring_drops_when_full() {
+        reset_leave_ring();
+        for slot in &TEL_LEAVE_RING {
+            slot.ready.store(1, Ordering::Relaxed);
+        }
+        TEL_LEAVE_READY.store(true, Ordering::Release);
+        unsafe { tel_leave(0x5678) };
+        assert!(TEL_LEAVE_RING
+            .iter()
+            .all(|slot| slot.handle.load(Ordering::Relaxed) != 0x5678));
+        TEL_LEAVE_READY.store(false, Ordering::Release);
+        reset_leave_ring();
     }
 }

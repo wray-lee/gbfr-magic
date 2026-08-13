@@ -9,11 +9,11 @@
 // 命令行可带唯一 run ID 前缀 `#<runid>` (如 `#001 state`): 精确整行去重,
 // 相同命令不同 run ID 均执行; CMD/RESULT 日志带同一 run ID 便于关联证据
 
-mod scan;
-mod kick;
 mod antikick;
-mod sdk;
 mod detour;
+mod kick;
+mod scan;
+mod sdk;
 mod telemetry;
 
 use std::collections::HashSet;
@@ -22,20 +22,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows_sys::Win32::System::Threading::CreateThread;
 
 // 全局状态 (注入进程内)
-pub static SDK_BASE: AtomicU64 = AtomicU64::new(0);          // PlayFabMultiplayerWin.dll 基址
-pub static MP_HANDLE: AtomicU64 = AtomicU64::new(0);         // PFMultiplayerHandle (游戏初始化好的)
-pub static MY_ID: AtomicU64 = AtomicU64::new(0);             // 自己 entity id (C 字符串指针, setid 命令设置)
-pub static ANTIKICK: AtomicBool = AtomicBool::new(false);    // 防踢开关
+pub static SDK_BASE: AtomicU64 = AtomicU64::new(0); // PlayFabMultiplayerWin.dll 基址
+pub static MP_HANDLE: AtomicU64 = AtomicU64::new(0); // PFMultiplayerHandle (游戏初始化好的)
+pub static MY_ID: AtomicU64 = AtomicU64::new(0); // 自己 entity id (C 字符串指针, setid 命令设置)
+pub static ANTIKICK: AtomicBool = AtomicBool::new(false); // 防踢开关
 
 const CMD_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_sdk_cmd.txt";
 const OUT_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_sdk_out.txt";
 // T5 诊断开关文件 (DLL 加载时读一次; inject.exe 无法改已运行进程的环境变量)
-// 每行一个选项, 未知/空行忽略, 大小写不敏感: hooks / grab / no_telemetry / no_join
+// 每行一个选项, 空行忽略, 大小写不敏感。主选择器 hooks / grab / leave 至多一个；
+// no_telemetry / no_join 仅修饰 legacy hooks；未知或冲突输入 fail-closed 到 S0。
 const DIAG_FILE: &str = r"C:\Users\Wray\AppData\Local\Temp\opencode\gbfr_diag.txt";
 
 // T5 诊断开关 (DllMain 从 DIAG_FILE 解析后写入; 默认 = S0 load-only, 零游戏/PlayFab hook)
-// `hooks` = 显式 opt-in 安装完整 hook 集; `no_telemetry`/`no_join` 在其上按需减装
-// Phase 2C `grab` = 显式选择器: 只装现有临时抓取 hook (sdk::install_grab_handle), 首个 cmd update 安装 (避开 DllMain loader lock)
+// 主选择器 hooks/grab/leave 至多一个；未知行或多个主选择器 fail-closed 到 S0。
+// no_telemetry/no_join 仅是 legacy hooks 的修饰符，不会自行启用 hook。
 pub static DIAG_HOOKS: AtomicBool = AtomicBool::new(false);
 pub static DIAG_GRAB: AtomicBool = AtomicBool::new(false);
 pub static DIAG_LEAVE: AtomicBool = AtomicBool::new(false);
@@ -43,29 +44,48 @@ pub static DIAG_NO_TELEMETRY: AtomicBool = AtomicBool::new(false);
 pub static DIAG_NO_JOIN: AtomicBool = AtomicBool::new(false);
 
 // 纯函数: 解析诊断开关文件内容 (单测覆盖; 文件读取在 DllMain)
-// 返回 (hooks, grab, leave, no_telemetry, no_join); 无文件/空文件 → 全 false = S0 load-only
+// 返回 (hooks, grab, leave, no_telemetry, no_join); 无文件/空文件/未知/冲突 → 主选择器全 false = S0 load-only
 pub fn parse_diag_flags(content: &str) -> (bool, bool, bool, bool, bool) {
     let mut hooks = false;
     let mut grab = false;
     let mut leave = false;
     let mut no_telemetry = false;
     let mut no_join = false;
+    let mut invalid = false;
     for raw in content.lines() {
-        match raw.trim().to_ascii_lowercase().as_str() {
+        let flag = raw.trim().to_ascii_lowercase();
+        if flag.is_empty() {
+            continue;
+        }
+        match flag.as_str() {
             "hooks" => hooks = true,
             "grab" => grab = true,
             "leave" => leave = true,
             "no_telemetry" => no_telemetry = true,
             "no_join" => no_join = true,
-            _ => {}
+            _ => invalid = true,
         }
+    }
+    if invalid
+        || [hooks, grab, leave]
+            .into_iter()
+            .filter(|selected| *selected)
+            .count()
+            > 1
+    {
+        hooks = false;
+        grab = false;
+        leave = false;
     }
     (hooks, grab, leave, no_telemetry, no_join)
 }
 
 // UTC 时间戳 e.g. "2026-08-11T12:34:56Z", 每个 log 行前缀
 fn ts() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     ts_from_secs(secs)
 }
 
@@ -93,7 +113,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 pub fn log(msg: &str) {
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(OUT_FILE) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(OUT_FILE)
+    {
         let _ = writeln!(f, "[{}] {}", ts(), msg);
     }
 }
@@ -286,7 +310,10 @@ unsafe extern "system" fn cmd_thread(_p: *mut core::ffi::c_void) -> u32 {
                 seen.insert(line.to_string());
             }
         }
-        log(&format!("[dll] command history baselined ({} lines)", seen.len()));
+        log(&format!(
+            "[dll] command history baselined ({} lines)",
+            seen.len()
+        ));
     }
     // Phase 2C S1: `grab` 选择器推迟到首个 update 安装 — DllMain 已在 loader lock 内返回,
     // 此处抓取 hook 与游戏线程并发 (capture 幂等安装, 不触碰 lobby 状态机)
@@ -294,10 +321,11 @@ unsafe extern "system" fn cmd_thread(_p: *mut core::ffi::c_void) -> u32 {
     loop {
         if first_update {
             first_update = false;
-            if DIAG_GRAB.load(Ordering::Relaxed) || DIAG_LEAVE.load(Ordering::Relaxed) {
+            if DIAG_GRAB.load(Ordering::Relaxed) {
                 sdk::install_grab_handle();
             }
         }
+        telemetry::drain();
         // T10: 轮询异步入房 out-param 槽 (两次静态检查, 极廉) — 抓到 lobby handle 即 one-shot 存 LOBBY_JOIN
         kick::poll_join_out();
         // T1: 被动 telemetry (幂等, 门控不过/已装即静默早退) — MP_HANDLE 抓到 (grab 已恢复) 后才装
@@ -306,7 +334,7 @@ unsafe extern "system" fn cmd_thread(_p: *mut core::ffi::c_void) -> u32 {
             telemetry::install();
         } else if DIAG_LEAVE.load(Ordering::Relaxed) {
             // Phase 2C S2: `leave` 选择器 — 只装 PFLobbyLeave 被动记录 far stub
-            // (不装 FinishProcessing probe; MP_HANDLE 抓到后才装, 幂等)
+            // (不装 grab/FinishProcessing; 幂等安装在 cmd worker, 避开 DllMain loader lock)
             telemetry::install_leave_only();
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -330,7 +358,11 @@ unsafe extern "system" fn cmd_thread(_p: *mut core::ffi::c_void) -> u32 {
 // B23/MINOR-5: PROCESS_ATTACH (loader lock 内) 执行文件 I/O log — 注入工具常见实践, 已实测可行;
 //   严格性限制已知 (loader lock 内 I/O 可能阻塞/死锁于极端情况, 且 log 失败静默), 不重构仅记录。
 #[no_mangle]
-pub unsafe extern "system" fn DllMain(_h: *mut core::ffi::c_void, reason: u32, _r: *mut core::ffi::c_void) -> i32 {
+pub unsafe extern "system" fn DllMain(
+    _h: *mut core::ffi::c_void,
+    reason: u32,
+    _r: *mut core::ffi::c_void,
+) -> i32 {
     if reason == 1 {
         // DLL_PROCESS_ATTACH
         log("[dll] attached");
@@ -355,13 +387,20 @@ pub unsafe extern "system" fn DllMain(_h: *mut core::ffi::c_void, reason: u32, _
             // K1/B21-B22: hook SDK PFLobbyPostUpdate/PFLobbyGetLobbyId 导出抓 lobby handle (B12)
             kick::install_lobby_hooks(no_join);
         } else if grab || leave {
-            // Phase 2C S1/S2: 只装抓取 hook, 首个 cmd update 安装 (避开 DllMain loader lock)
+            // Phase 2C S1/S2: 首个 cmd update 安装所选单一 hook (避开 DllMain loader lock)
             log("[dll] deferred install to first cmd update (grab/leave selector)");
         } else {
             log("[dll] S0 load-only: zero game/PlayFab hooks installed");
         }
         let mut tid = 0u32;
-        CreateThread(std::ptr::null(), 0, Some(cmd_thread), std::ptr::null_mut(), 0, &mut tid);
+        CreateThread(
+            std::ptr::null(),
+            0,
+            Some(cmd_thread),
+            std::ptr::null_mut(),
+            0,
+            &mut tid,
+        );
     }
     1
 }
@@ -436,42 +475,94 @@ mod tests {
     #[test]
     fn diag_empty_and_missing_defaults_s0_load_only() {
         assert_eq!(parse_diag_flags(""), (false, false, false, false, false));
-        assert_eq!(parse_diag_flags("   \n\t\n"), (false, false, false, false, false));
+        assert_eq!(
+            parse_diag_flags("   \n\t\n"),
+            (false, false, false, false, false)
+        );
     }
 
     #[test]
     fn diag_flags_parse_with_trim_and_case_insensitive() {
-        assert_eq!(parse_diag_flags("no_telemetry\nno_join"), (false, false, false, true, true));
-        assert_eq!(parse_diag_flags("  NO_TELEMETRY  \n"), (false, false, false, true, false));
-        assert_eq!(parse_diag_flags("no_join"), (false, false, false, false, true));
+        assert_eq!(
+            parse_diag_flags("no_telemetry\nno_join"),
+            (false, false, false, true, true)
+        );
+        assert_eq!(
+            parse_diag_flags("  NO_TELEMETRY  \n"),
+            (false, false, false, true, false)
+        );
+        assert_eq!(
+            parse_diag_flags("no_join"),
+            (false, false, false, false, true)
+        );
     }
 
     #[test]
     fn diag_hooks_is_explicit_optin() {
-        assert_eq!(parse_diag_flags("hooks"), (true, false, false, false, false));
-        assert_eq!(parse_diag_flags("  HOOKS  \n"), (true, false, false, false, false));
-        assert_eq!(parse_diag_flags("hooks\nno_telemetry\nno_join"), (true, false, false, true, true));
+        assert_eq!(
+            parse_diag_flags("hooks"),
+            (true, false, false, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("  HOOKS  \n"),
+            (true, false, false, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("hooks\nno_telemetry\nno_join"),
+            (true, false, false, true, true)
+        );
     }
 
     #[test]
     fn diag_grab_is_explicit_selector() {
         assert_eq!(parse_diag_flags("grab"), (false, true, false, false, false));
-        assert_eq!(parse_diag_flags("  GRAB  \n"), (false, true, false, false, false));
-        assert_eq!(parse_diag_flags("grab\nno_telemetry"), (false, true, false, true, false));
-        assert_eq!(parse_diag_flags("hooks\ngrab"), (true, true, false, false, false));
+        assert_eq!(
+            parse_diag_flags("  GRAB  \n"),
+            (false, true, false, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("grab\nno_telemetry"),
+            (false, true, false, true, false)
+        );
+        assert_eq!(
+            parse_diag_flags("hooks\ngrab"),
+            (false, false, false, false, false)
+        );
     }
 
     #[test]
     fn diag_leave_is_explicit_selector() {
-        assert_eq!(parse_diag_flags("leave"), (false, false, true, false, false));
-        assert_eq!(parse_diag_flags("  LEAVE  \n"), (false, false, true, false, false));
-        assert_eq!(parse_diag_flags("leave\nno_telemetry"), (false, false, true, true, false));
-        assert_eq!(parse_diag_flags("hooks\nleave"), (true, false, true, false, false));
+        assert_eq!(
+            parse_diag_flags("leave"),
+            (false, false, true, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("  LEAVE  \n"),
+            (false, false, true, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("leave\nno_telemetry"),
+            (false, false, true, true, false)
+        );
+        assert_eq!(
+            parse_diag_flags("hooks\nleave"),
+            (false, false, false, false, false)
+        );
     }
 
     #[test]
-    fn diag_unknown_lines_ignored() {
-        assert_eq!(parse_diag_flags("bogus\nno_kick\nNO_TELEMETRY_extra"), (false, false, false, false, false));
-        assert_eq!(parse_diag_flags("no_telemetry\nno_join\n# comment"), (false, false, false, true, true));
+    fn diag_unknown_lines_fail_closed() {
+        assert_eq!(
+            parse_diag_flags("bogus\nno_kick\nNO_TELEMETRY_extra"),
+            (false, false, false, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("leave\n# comment"),
+            (false, false, false, false, false)
+        );
+        assert_eq!(
+            parse_diag_flags("no_telemetry\nno_join"),
+            (false, false, false, true, true)
+        );
     }
 }
