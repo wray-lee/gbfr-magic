@@ -93,7 +93,8 @@ pub fn init() {
         let g = game_base();
         if g != 0 {
             GAME_KICK_CONFIG = (g + 0x3B4CD8D) as usize;
-            log(&format!("[sdk] game=0x{:X} KICKCFG=0x{:X}", g, GAME_KICK_CONFIG));
+            let kick_config = GAME_KICK_CONFIG;
+            log(&format!("[sdk] game=0x{:X} KICKCFG=0x{:X}", g, kick_config));
         } else {
             log("[sdk] game exe not loaded (KICKCFG unavailable)");
         }
@@ -117,17 +118,21 @@ static mut GRAB_HOOK: *mut detour::Hook = std::ptr::null_mut();
 pub fn install_grab_handle() -> bool {
     unsafe {
         if MP_HANDLE.load(Ordering::Relaxed) != 0 { return true; }
+        // 幂等: 已装 (如 `hooks` 路径 DllMain 已装, `grab` 首个 update 再来) → 静默早退
+        if !GRAB_HOOK.is_null() { return true; }
         let sp = FN_START_PROCESSING;
         if sp == 0 {
             log("[sdk] StartProcessing not resolved, grab hook skipped");
             return false;
         }
-        // B20: hook 区域 = 6 字节 (完整指令边界, 2026-08-11 文件字节验证)
-        // T2: 预检 — target 必须在 PlayFabMultiplayerWin.dll 模块范围内, 否则不装
-        if !detour::preflight(sp, "PlayFabMultiplayerWin.dll", detour::module_range("PlayFabMultiplayerWin.dll")) {
-            return false;
-        }
-        match detour::install_capture(sp, 6) {
+        let expected = [0x40, 0x55, 0x56, 0x57, 0x41, 0x54];
+        match detour::install_capture_checked(
+            sp,
+            &expected,
+            "StartProcessing",
+            "PlayFabMultiplayerWin.dll",
+            detour::module_range("PlayFabMultiplayerWin.dll"),
+        ) {
             Some(h) => {
                 GRAB_HOOK = Box::into_raw(Box::new(h));
                 log("[sdk] grab hook installed on StartProcessing (module=PlayFabMultiplayerWin.dll)");
@@ -154,7 +159,10 @@ pub fn check_handle() {
                 v,
                 (*GRAB_HOOK).counts()
             ));
-            (*GRAB_HOOK).restore();
+            if !(*GRAB_HOOK).restore() {
+                log("[sdk] grab hook restore FAILED — slot retained");
+                return;
+            }
             log("[sdk] grab hook restored");
         }
     }

@@ -166,19 +166,43 @@ unsafe extern "C" {
     static mut gbfr_ak_tramp: u64;
 }
 
-// T6: 指针可读性决策 (纯函数, 单测) — 镜像 VirtualQuery 决策: p==0 / p<0x10000 / 未提交 → false
+// T6: 指针基础决策 (纯函数, 单测) — p==0 / p<0x10000 / 内存范围不可读 → false
 // T1: pub(crate) — telemetry.rs 复用 (不重复实现)
-pub(crate) fn ptr_safe(p: u64, committed: bool) -> bool {
-    p != 0 && p >= 0x10000 && committed
+pub(crate) fn ptr_safe(p: u64, readable: bool) -> bool {
+    p != 0 && p >= 0x10000 && readable
 }
 
-// T6: VirtualQuery 提交状态检查 (返回 0 或 State!=MEM_COMMIT → 不可读)
+// T6: VirtualQuery 可读范围检查。仅 MEM_COMMIT 不足以证明可读：PAGE_NOACCESS/PAGE_GUARD
+// 也可能是 committed；同时确保整个读取区间不跨出当前 region。
 // T1: pub(crate) — telemetry.rs 复用 (不重复实现)
-pub(crate) unsafe fn mem_committed(p: usize) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEM_COMMIT, MEMORY_BASIC_INFORMATION};
+pub(crate) unsafe fn mem_readable(p: usize, len: usize) -> bool {
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ,
+        PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_READONLY, PAGE_READWRITE,
+        PAGE_WRITECOPY,
+    };
+    if len == 0 {
+        return true;
+    }
     let mut mbi = std::mem::zeroed::<MEMORY_BASIC_INFORMATION>();
-    VirtualQuery(p as *const core::ffi::c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0
-        && mbi.State == MEM_COMMIT
+    if VirtualQuery(p as *const core::ffi::c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0
+        || mbi.State != MEM_COMMIT
+    {
+        return false;
+    }
+    let readable = matches!(
+        mbi.Protect,
+        PAGE_READONLY
+            | PAGE_READWRITE
+            | PAGE_WRITECOPY
+            | PAGE_EXECUTE_READ
+            | PAGE_EXECUTE_READWRITE
+            | PAGE_EXECUTE_WRITECOPY
+    );
+    let Some(end) = p.checked_add(len) else { return false };
+    let base = mbi.BaseAddress as usize;
+    let Some(region_end) = base.checked_add(mbi.RegionSize) else { return false };
+    readable && p >= base && end <= region_end
 }
 
 // 判断成员实体是否是自己 (rdx 指向 PFEntityKey 风格 {id*, type*})
@@ -190,18 +214,23 @@ pub(crate) unsafe fn mem_committed(p: usize) -> bool {
 unsafe extern "system" fn ak_check(entity: usize) -> i32 {
     let my = MY_ID.load(Ordering::Relaxed);
     if my == 0 || entity == 0 { return 0; }
-    if !ptr_safe(my, mem_committed(my as usize)) {
+    if !ptr_safe(my, mem_readable(my as usize, 1)) {
         log("[ak] MY_ID invalid, pass-through");
         return 0;
     }
-    if !ptr_safe(entity as u64, mem_committed(entity)) { return 0; }
+    if !ptr_safe(entity as u64, mem_readable(entity, 8)) { return 0; }
     let id_ptr = *(entity as *const u64);
-    if !ptr_safe(id_ptr, mem_committed(id_ptr as usize)) { return 0; }
+    if !ptr_safe(id_ptr, mem_readable(id_ptr as usize, 1)) { return 0; }
     // 比较字符串
     let mut i = 0usize;
     loop {
-        let a = *(id_ptr as *const u8).add(i);
-        let b = *(my as *const u8).add(i);
+        let Some(id_addr) = (id_ptr as usize).checked_add(i) else { return 0 };
+        let Some(my_addr) = (my as usize).checked_add(i) else { return 0 };
+        if !mem_readable(id_addr, 1) || !mem_readable(my_addr, 1) {
+            return 0;
+        }
+        let a = *(id_addr as *const u8);
+        let b = *(my_addr as *const u8);
         if a != b { return 0; }
         if a == 0 { return 1; }
         i += 1;
@@ -253,7 +282,10 @@ pub fn unhook() {
             log("[ak] already unhooked");
             return;
         }
-        (*HOOK_AK).restore();
+        if !(*HOOK_AK).restore() {
+            log("[ak] hook restore FAILED — slot retained");
+            return;
+        }
         let _ = Box::from_raw(HOOK_AK);
         HOOK_AK = std::ptr::null_mut();
         AK_NEAR = 0;
@@ -283,12 +315,36 @@ pub fn install() {
             return;
         }
         let target = (b + SDK_MEMBER_REMOVED_FACTORY) as usize;
+        // Legacy SDK-side MemberRemoved factory remains quarantined by default.
+        // Its historical 0x63C90 address was never a reliable target-side guard.
+        // Do not install this crash-prone experiment from the normal command path.
+        log("[ak] REFUSED: legacy SDK MemberRemoved factory is quarantined");
+        return;
+        #[allow(unreachable_code)]
         // B20: hook 区域 = 6 字节 (0x63C90 序言 40 55|56|57|41 54, 边界 {2,3,4,6,8,10,12} 7×push 完整集, len=6 在边界上, B25/MINOR-4)
-        match detour::install_far(target, 6, gbfr_antikick_stub as *const () as usize) {
+        if !detour::preflight(target, "PlayFabMultiplayerWin.dll", detour::module_range("PlayFabMultiplayerWin.dll")) {
+            log("[ak] PREFLIGHT FAIL — hook not installed");
+            return;
+        }
+        let expected = [0x40, 0x55, 0x56, 0x57, 0x41, 0x54];
+        let actual = std::slice::from_raw_parts(target as *const u8, expected.len());
+        if actual != expected {
+            log(&format!(
+                "[ak] 0x63C90 signature mismatch want={} got={}",
+                detour::hex16(&expected),
+                detour::hex16(actual)
+            ));
+            return;
+        }
+        gbfr_ak_check_fn = ak_check as *const () as usize as u64;
+        match detour::install_far(
+            target,
+            6,
+            gbfr_antikick_stub as *const () as usize,
+            std::ptr::addr_of_mut!(gbfr_ak_tramp),
+        ) {
             Some(h) => {
                 AK_NEAR = h.near_addr();
-                gbfr_ak_tramp = h.trampoline() as u64;
-                gbfr_ak_check_fn = ak_check as *const () as usize as u64;
                 gbfr_ak_enabled = 1;
                 HOOK_AK = Box::into_raw(Box::new(h)); // B29
                 log(&format!("[ak] hook installed at 0x{:X} (证据等级: B18.4 静态设计, B15 动态有张力, 见 B20/L6)", target));
@@ -374,10 +430,12 @@ gbfr_ak2_stub:
     mov rdx, qword ptr [rsp + 0x28]
     mov r8, qword ptr [rsp + 0x20]
     call rax
+    lock inc qword ptr [rip + gbfr_ak2_calls]
     cmp qword ptr [rip + gbfr_ak2_enabled], 0
     je gbfr_ak2_restore
     test eax, eax
     jne gbfr_ak2_restore
+    lock inc qword ptr [rip + gbfr_ak2_matches]
     mov rcx, qword ptr [rsp + 0x30]
     mov rdx, qword ptr [rsp + 0x28]
     mov rax, qword ptr [rip + gbfr_ak2_diag_fn]
@@ -405,6 +463,12 @@ gbfr_ak2_enabled:
     .global gbfr_ak2_diag_fn
 gbfr_ak2_diag_fn:
     .quad 0
+    .global gbfr_ak2_calls
+gbfr_ak2_calls:
+    .quad 0
+    .global gbfr_ak2_matches
+gbfr_ak2_matches:
+    .quad 0
     "#
 );
 unsafe extern "C" {
@@ -413,6 +477,8 @@ unsafe extern "C" {
     static mut gbfr_ak2_back: u64;
     static mut gbfr_ak2_enabled: u64;
     static mut gbfr_ak2_diag_fn: u64;
+    static mut gbfr_ak2_calls: u64;
+    static mut gbfr_ak2_matches: u64;
 }
 
 // T4 retarget 诊断: 记录被踢路径上游戏比较的两个 key (预算 8 次/run 防日志风暴;
@@ -423,7 +489,7 @@ static AK2_DIAG_BUDGET: AtomicU64 = AtomicU64::new(0);
 
 // 读最多 12 字节: 全部可打印 ASCII (NUL 截断) → hex 字符串; 守卫失败/不可打印 → None
 unsafe fn peek_hex(p: u64) -> Option<String> {
-    if !ptr_safe(p, mem_committed(p as usize)) {
+    if !ptr_safe(p, mem_readable(p as usize, 1)) {
         return None;
     }
     let mut buf = [0u8; 12];
@@ -517,15 +583,25 @@ pub fn native_guard_on() {
             }
             return;
         }
+        // Publish immutable target data before patching. Keep suppression disabled
+        // until install_far has completed; the patched site can be hit immediately.
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_real), b + AK2_MEMCMP_RVA);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_back), b + AK2_BACK_RVA);
-        std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 1);
+        std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_diag_fn), gbfr_ak2_diag_peek as *const () as u64);
-        match detour::install_far(target, 5, gbfr_ak2_stub as *const () as usize) {
+        match detour::install_far(
+            target,
+            5,
+            gbfr_ak2_stub as *const () as usize,
+            std::ptr::null_mut(),
+        ) {
             Some(h) => {
                 std::ptr::write(std::ptr::addr_of_mut!(AK2_NEAR), h.near_addr());
                 std::ptr::write(std::ptr::addr_of_mut!(HOOK_AK2), Box::into_raw(Box::new(h)));
-                log(&format!("[ak2] native guard installed at 0x{:X}", target));
+                std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 1);
+                std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_calls), 0);
+                std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_matches), 0);
+                log(&format!("[ak2] native guard installed at 0x{:X} enabled=1 real=0x{:X} back=0x{:X}", target, b + AK2_MEMCMP_RVA, b + AK2_BACK_RVA));
             }
             None => {
                 std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 0);
@@ -534,6 +610,17 @@ pub fn native_guard_on() {
         }
     }
 }
+
+// Direct target-side Leave callsite (docs/networking.md, dynamically confirmed).
+// This is the narrowest boundary that is guaranteed to execute before the local
+// PFLobbyLeave request. Experimental hook work must distinguish a kick-triggered
+// leave from a voluntary leave before suppressing it; never blanket-NOP this call.
+pub const NATIVE_LEAVE_CALL_RVA: u64 = 0x3B3B4FA;
+pub const NATIVE_LEAVE_CALL_SIG: [u8; 10] = [
+    0x45, 0x31, 0xC0,             // xor r8d,r8d
+    0xE8, 0xE1, 0x21, 0xE7, 0x00, // call PFLobbyLeave thunk
+    0x85, 0xC0,                   // test eax,eax
+];
 
 // native_antikick_exp off + unload: 幂等恢复 — enabled=0 → restore (字节校验) → 清槽;
 // 无 tramp 全局槽 (trampoline 不使用, 无需清)
@@ -545,10 +632,16 @@ pub fn native_guard_uninstall() {
             return;
         }
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_enabled), 0);
-        (*hook).restore();
+            if !(*hook).restore() {
+                log("[ak2] native guard restore FAILED — slot retained");
+                return;
+            }
         let _ = Box::from_raw(hook);
         std::ptr::write(std::ptr::addr_of_mut!(HOOK_AK2), std::ptr::null_mut());
         std::ptr::write(std::ptr::addr_of_mut!(AK2_NEAR), 0);
+        let calls = std::ptr::read(std::ptr::addr_of!(gbfr_ak2_calls));
+        let matches = std::ptr::read(std::ptr::addr_of!(gbfr_ak2_matches));
+        log(&format!("[ak2] counters calls={} matches={}", calls, matches));
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_real), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_back), 0);
         std::ptr::write(std::ptr::addr_of_mut!(gbfr_ak2_diag_fn), 0);
@@ -593,13 +686,38 @@ mod tests {
 
     #[test]
     fn my_id_guard() {
-        // ptr_safe 决策: p==0 / p<0x10000 / 未提交 → false
+        // ptr_safe 决策: p==0 / p<0x10000 / 内存范围不可读 → false
         assert!(!ptr_safe(0, true));
         assert!(!ptr_safe(0, false));
         assert!(!ptr_safe(0x8000, true));
         assert!(!ptr_safe(0x10000, false));
         assert!(ptr_safe(0x10000, true));
         assert!(ptr_safe(0x7FFF_FFFF_FFFF, true));
+    }
+
+    #[test]
+    fn readable_range_rejects_reserved_and_accepts_committed() {
+        unsafe {
+            use windows_sys::Win32::System::Memory::{
+                VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_NOACCESS,
+                PAGE_READWRITE,
+            };
+            let reserved = VirtualAlloc(std::ptr::null(), 0x1000, MEM_RESERVE, PAGE_NOACCESS);
+            assert!(!reserved.is_null());
+            assert!(!mem_readable(reserved as usize, 1));
+            VirtualFree(reserved, 0, MEM_RELEASE);
+
+            let committed = VirtualAlloc(
+                std::ptr::null(),
+                0x1000,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            );
+            assert!(!committed.is_null());
+            assert!(mem_readable(committed as usize, 8));
+            assert!(!mem_readable(committed as usize + 0xFFC, 8));
+            VirtualFree(committed, 0, MEM_RELEASE);
+        }
     }
 
     // ===== T2: 路径分类 =====

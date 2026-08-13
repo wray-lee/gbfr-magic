@@ -6,6 +6,8 @@
 // - 被 hook 区域必须是完整指令边界; 各 hook 点指令边界 2026-08-11 capstone 实测 (B22):
 //     PFLobbyPostUpdate 0x39F60: 40 53|55|56|57|41 54|41 55|41 56|41 57 → 边界 {2,3,4,5,7,9,11,13}, len=7
 //     PFLobbyGetLobbyId 0x38050: 40 55|56|57|41 56|41 57          → 边界 {2,3,4,6,8},   len=6
+//     PFLobbyGetMembers/MemberProperty/LobbyProperty/MemberConnectionStatus 与 Join/CreateJoin:
+//       40 53|55|56|57|41 54... → 边界 {2,3,4,5,7,...}, len=7
 //     StartProcessing 0x3FA90 / 0x63C90: 40 55|56|57|41 54|41 55|41 56|41 57 → 边界 {2,3,4,6,8,10,12} (7×push, B25/MINOR-4 完整集), len=6
 //   (B20/B21 曾用 len=6/5 — 在 push r12/push r14 (2 字节 41 5X) 中间断开: 悬空 REX 吞 E9、
 //    被 hook 函数丢一次 callee-saved push, 尾块 pop 恢复垃圾值 → 调用方寄存器破坏。B22 修正)
@@ -21,7 +23,8 @@
 //     函数体后续运算也会重写 flags, 故对游戏无行为影响 (B24/MAJOR-1 同源推理:
 //     只审查被 hook 序言实际消费的状态, 序言只消费寄存器, 不消费 flags)
 //   install_far:     近块内联 "jmp [rip+slot]" → 外部 far_stub (复杂逻辑场景, antikick)
-//     slot@+0x08 (far_stub), 跳板@+0x10 — T2 不改, antikick 依赖 trampoline()
+//     slot@+0x08 (far_stub), 跳板@+0x10；调用方的 trampoline 槽在 target patch 前发布，
+//     避免高频入口命中已生效 patch、但外部 stub 仍看到空返回槽的竞态窗口。
 use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{
@@ -46,7 +49,6 @@ pub struct Hook {
     target: usize,
     len: usize,
     near: usize,
-    tramp_off: usize,
     is_capture: bool,
     orig: [u8; MAX_LEN],
 }
@@ -190,7 +192,13 @@ pub(crate) fn hex16(b: &[u8]) -> String {
     s
 }
 
-fn install_common(target: usize, len: usize, capture: bool, far_stub: usize) -> Option<Hook> {
+fn install_common(
+    target: usize,
+    len: usize,
+    capture: bool,
+    far_stub: usize,
+    far_trampoline_slot: *mut u64,
+) -> Option<Hook> {
     unsafe {
         if !(5..=MAX_LEN).contains(&len) {
             return None;
@@ -227,15 +235,28 @@ fn install_common(target: usize, len: usize, capture: bool, far_stub: usize) -> 
         *(p as *mut u8) = 0xE9;
         ptr::copy_nonoverlapping((rel as i32).to_le_bytes().as_ptr(), (p + 1) as *mut u8, 4);
         flush(near, ALLOC_SIZE);
+        if !capture && !far_trampoline_slot.is_null() {
+            ptr::write(far_trampoline_slot, tramp as u64);
+        }
         // 写 hook: E9 rel32 → near + (len-5) 个 NOP (覆盖完整指令区域)
         let mut patch = [0x90u8; MAX_LEN];
         let rel = near as i64 - (target + 5) as i64;
         patch[0] = 0xE9;
         patch[1..5].copy_from_slice(&(rel as i32).to_le_bytes());
         let mut old = 0u32;
-        VirtualProtect(target as *mut c_void, len, PAGE_EXECUTE_READWRITE, &mut old);
+        if VirtualProtect(target as *mut c_void, len, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
+            if !capture && !far_trampoline_slot.is_null() {
+                ptr::write(far_trampoline_slot, 0);
+            }
+            log(&format!("[detour] VirtualProtect RWX FAILED target=0x{:X}", target));
+            return None;
+        }
         ptr::copy_nonoverlapping(patch.as_ptr(), target as *mut u8, len);
-        VirtualProtect(target as *mut c_void, len, old, &mut old);
+        let original_protect = old;
+        let mut ignored = 0u32;
+        if VirtualProtect(target as *mut c_void, len, original_protect, &mut ignored) == 0 {
+            log(&format!("[detour] VirtualProtect RESTORE FAILED target=0x{:X}", target));
+        }
         flush(target, len);
         // T2: 字节校验 — 读回 target 前 len 字节与预期 patch 比较; 不一致立即回滚
         let mut check = [0u8; MAX_LEN];
@@ -247,10 +268,20 @@ fn install_common(target: usize, len: usize, capture: bool, far_stub: usize) -> 
                 hex16(&patch[..len]),
                 hex16(&check[..len])
             ));
-            VirtualProtect(target as *mut c_void, len, PAGE_EXECUTE_READWRITE, &mut old);
-            ptr::copy_nonoverlapping(orig.as_ptr(), target as *mut u8, len);
-            VirtualProtect(target as *mut c_void, len, old, &mut old);
-            flush(target, len);
+            let mut rollback_old = 0u32;
+            if VirtualProtect(target as *mut c_void, len, PAGE_EXECUTE_READWRITE, &mut rollback_old) != 0 {
+                ptr::copy_nonoverlapping(orig.as_ptr(), target as *mut u8, len);
+                let mut ignored = 0u32;
+                if VirtualProtect(target as *mut c_void, len, rollback_old, &mut ignored) == 0 {
+                    log(&format!("[detour] ROLLBACK PROTECT RESTORE FAILED target=0x{:X}", target));
+                }
+                flush(target, len);
+            } else {
+                log(&format!("[detour] ROLLBACK VirtualProtect FAILED target=0x{:X}", target));
+            }
+            if !capture && !far_trampoline_slot.is_null() {
+                ptr::write(far_trampoline_slot, 0);
+            }
             return None;
         }
         log(&format!(
@@ -262,24 +293,52 @@ fn install_common(target: usize, len: usize, capture: bool, far_stub: usize) -> 
             hex16(&patch[..len]),
             tramp
         ));
-        Some(Hook { target, len, near, tramp_off, is_capture: capture, orig })
+        Some(Hook { target, len, near, is_capture: capture, orig })
     }
 }
 
 /// 抓寄存器 hook: 近块内联保存 rcx, 调用方用 saved() 读取
 pub fn install_capture(target: usize, len: usize) -> Option<Hook> {
-    install_common(target, len, true, 0)
+    install_common(target, len, true, 0, ptr::null_mut())
 }
 
-/// 跳转到外部 stub (stub 负责逻辑, 最后 jmp [rip+tramp_slot]; tramp_slot 由调用方设为 trampoline())
-pub fn install_far(target: usize, len: usize, far_stub: usize) -> Option<Hook> {
-    install_common(target, len, false, far_stub)
+pub fn install_capture_checked(
+    target: usize,
+    expected: &[u8],
+    name: &str,
+    module: &str,
+    range: Option<(u64, usize)>,
+) -> Option<Hook> {
+    if target == 0 || !preflight(target, module, range) {
+        return None;
+    }
+    unsafe {
+        let actual = std::slice::from_raw_parts(target as *const u8, expected.len());
+        if actual != expected {
+            log(&format!(
+                "[detour] {} signature mismatch want={} got={}",
+                name,
+                hex16(expected),
+                hex16(actual)
+            ));
+            return None;
+        }
+    }
+    install_capture(target, expected.len())
+}
+
+/// 跳转到外部 stub。若 stub 最后读取外部 trampoline 槽，传入该槽地址；安装器会在
+/// target patch 生效前写入 trampoline，失败回滚时清零。无需外部槽的 stub 可传 null。
+pub unsafe fn install_far(
+    target: usize,
+    len: usize,
+    far_stub: usize,
+    trampoline_slot: *mut u64,
+) -> Option<Hook> {
+    install_common(target, len, false, far_stub, trampoline_slot)
 }
 
 impl Hook {
-    pub fn trampoline(&self) -> usize {
-        self.near + self.tramp_off
-    }
     pub fn near_addr(&self) -> usize {
         self.near
     }
@@ -295,18 +354,27 @@ impl Hook {
         unsafe { ptr::read_unaligned((self.near + CAP_COUNT_OFF) as *const u64) }
     }
     /// 还原被 hook 的原指令 (仅适用于 capture/far 均可, 需保存 Hook 本体)
-    pub fn restore(&mut self) {
+    pub fn restore(&mut self) -> bool {
         unsafe {
             let mut old = 0u32;
-            VirtualProtect(self.target as *mut c_void, self.len, PAGE_EXECUTE_READWRITE, &mut old);
+            if VirtualProtect(self.target as *mut c_void, self.len, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
+                log(&format!("[detour] restore VirtualProtect FAILED target=0x{:X}", self.target));
+                return false;
+            }
             ptr::copy_nonoverlapping(self.orig.as_ptr(), self.target as *mut u8, self.len);
-            VirtualProtect(self.target as *mut c_void, self.len, old, &mut old);
+            let original_protect = old;
+            let mut ignored = 0u32;
+            if VirtualProtect(self.target as *mut c_void, self.len, original_protect, &mut ignored) == 0 {
+                log(&format!("[detour] restore protection FAILED target=0x{:X}", self.target));
+            }
             flush(self.target, self.len);
             // T2: 还原字节校验 — 读回 target 前 len 字节与 orig 比较
             let mut check = [0u8; MAX_LEN];
             ptr::copy_nonoverlapping(self.target as *const u8, check.as_mut_ptr(), self.len);
             if check[..self.len] == self.orig[..self.len] {
                 log(&format!("[detour] RESTORE VERIFY OK target=0x{:X}", self.target));
+                log(&format!("[detour] restored target=0x{:X}", self.target));
+                true
             } else {
                 log(&format!(
                     "[detour] RESTORE VERIFY FAIL target=0x{:X} want={} got={}",
@@ -314,8 +382,8 @@ impl Hook {
                     hex16(&self.orig[..self.len]),
                     hex16(&check[..self.len])
                 ));
+                false
             }
-            log(&format!("[detour] restored target=0x{:X}", self.target));
         }
     }
 }

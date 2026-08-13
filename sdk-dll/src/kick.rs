@@ -25,6 +25,10 @@ use crate::log;
 // T4: KICKCFG-rdi-swap 隔离开关 (默认关闭 — 实验性 rdi 改写, 会静默重定向游戏 UI 的任意踢人操作)
 pub static KICKCFG_EXPERIMENTAL: AtomicBool = AtomicBool::new(false);
 
+const SDK_PROLOGUE_RBP_R14: [u8; 6] = [0x40, 0x55, 0x56, 0x57, 0x41, 0x56];
+const SDK_PROLOGUE_RBX_R12: [u8; 7] = [0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x54];
+const KICKCFG_PROLOGUE: [u8; 8] = [0x48, 0x89, 0x7D, 0xB8, 0xC5, 0xF8, 0x57, 0xC0];
+
 static mut POST_NEAR: usize = 0;
 static mut GETID_NEAR: usize = 0;
 static mut MEMBERS_NEAR: usize = 0;
@@ -54,9 +58,8 @@ static mut HOOK_CREATEJOIN: *mut detour::Hook = std::ptr::null_mut();
 static mut LOBBY_JOIN: u64 = 0;
 
 // ===== B29: 踢人 config 构建点改写 rdi 方案 =====
-// 游戏 UI 踢人时 0x3B4CD8D 被调用 → stub 检查 pending; 若有目标, rdi 替换为 pending key id 指针
+// 游戏 UI 踢人时 0x3B4CD8D 被调用 → stub 检查汇编侧 pending; 若有目标, rdi 替换为 pending key id 指针
 // 静态存储保证 key 长期有效
-static mut KICK_PENDING: u64 = 0;
 static mut KICK_ID_BUF: [u8; 32] = [0; 32];
 static KICK_TYPE: &[u8] = b"title_player_account\0";
 
@@ -179,7 +182,7 @@ fn set_pending_kick(id: &str) {
             KICK_ID_BUF[i] = *b;
         }
         KICK_ID_BUF[bytes.len()] = 0;
-        gbfr_kick_id_ptr = KICK_ID_BUF.as_ptr() as u64;
+        gbfr_kick_id_ptr = std::ptr::addr_of!(KICK_ID_BUF).cast::<u8>() as u64;
         gbfr_kick_pending = 1;
     }
 }
@@ -198,11 +201,13 @@ pub fn set_kickcfg_experimental(on: bool) {
 fn try_install(
     target: usize,
     len: usize,
+    expected: &[u8],
     name: &str,
     module: &str,
     range: Option<(u64, usize)>,
     far: bool,
     stub: usize,
+    trampoline_slot: *mut u64,
 ) -> Option<detour::Hook> {
     if target == 0 {
         log(&format!("[kick] {} addr unavailable", name));
@@ -211,10 +216,24 @@ fn try_install(
     if !detour::preflight(target, module, range) {
         return None;
     }
+    if len != expected.len() {
+        log(&format!("[kick] {} invalid hook length len={} signature={}", name, len, expected.len()));
+        return None;
+    }
+    let actual = unsafe { std::slice::from_raw_parts(target as *const u8, expected.len()) };
+    if actual != expected {
+        log(&format!(
+            "[kick] {} signature mismatch want={} got={}",
+            name,
+            detour::hex16(expected),
+            detour::hex16(actual)
+        ));
+        return None;
+    }
     let h = if far {
-        detour::install_far(target, len, stub)
+        unsafe { detour::install_far(target, len, stub, trampoline_slot) }
     } else {
-        detour::install_capture(target, len)
+        detour::install_capture_checked(target, expected, name, module, range)
     };
     if h.is_some() {
         log(&format!("[kick] {} installed (module={})", name, module));
@@ -240,7 +259,9 @@ unsafe fn clear_hook(h: *mut *mut detour::Hook) -> bool {
     if !slot_held(slot) {
         return false;
     }
-    (*slot).restore();
+    if !(*slot).restore() {
+        return false;
+    }
     let _ = Box::from_raw(slot);
     std::ptr::write(h, std::ptr::null_mut());
     true
@@ -265,47 +286,47 @@ pub fn install_lobby_hooks(no_join: bool) -> bool {
         };
         // B12: 游戏调 PostUpdate 时 rcx = [容器+0x1d0] = lobby handle
         results.push(record(
-            try_install(FN_POST_UPDATE, 7, "PostUpdate", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_POST_UPDATE, 7, &SDK_PROLOGUE_RBX_R12, "PostUpdate", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(POST_NEAR),
             std::ptr::addr_of_mut!(HOOK_POST),
         ));
         // 官方 ABI: PFLobbyGetLobbyId(handle, &id), rcx = lobby handle
         results.push(record(
-            try_install(FN_GET_LOBBY_ID, 6, "GetLobbyId", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_LOBBY_ID, 6, &SDK_PROLOGUE_RBP_R14, "GetLobbyId", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(GETID_NEAR),
             std::ptr::addr_of_mut!(HOOK_GETID),
         ));
         // B29: 打开成员列表 → PFLobbyGetMembers(handle, ...), rcx = lobby handle (高频源)
-        // 序言: 40 55|56|57|41 56|41 57 → 边界 {2,3,4,6,8} (B22 同 GetLobbyId 风格, 先验证)
+        // 序言: 40 53|55|56|57|41 54... → 边界 {2,3,4,5,7,...}, len=7
         results.push(record(
-            try_install(FN_GET_MEMBERS, 6, "GetMembers", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_MEMBERS, 7, &SDK_PROLOGUE_RBX_R12, "GetMembers", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(MEMBERS_NEAR),
             std::ptr::addr_of_mut!(HOOK_MEMBERS),
         ));
         // T9: 自动捕获源 (B9 动态证据: 房内游戏持续轮询, 注入后无需任何 UI 操作即可抓到 handle)
         // 序言家族同 GetLobbyId (B22), len=6; capstone 边界待注入验证 — 若游戏异常立即禁用该源
         results.push(record(
-            try_install(FN_GET_OWNER, 6, "GetOwner", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_OWNER, 6, &SDK_PROLOGUE_RBP_R14, "GetOwner", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(OWNER_NEAR),
             std::ptr::addr_of_mut!(HOOK_OWNER),
         ));
         results.push(record(
-            try_install(FN_GET_MEMBER_PROPERTY, 6, "GetMemberProperty", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_MEMBER_PROPERTY, 7, &SDK_PROLOGUE_RBX_R12, "GetMemberProperty", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(GETMP_NEAR),
             std::ptr::addr_of_mut!(HOOK_GETMP),
         ));
         results.push(record(
-            try_install(FN_GET_LOBBY_PROPERTY, 6, "GetLobbyProperty", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_LOBBY_PROPERTY, 7, &SDK_PROLOGUE_RBX_R12, "GetLobbyProperty", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(GETLP_NEAR),
             std::ptr::addr_of_mut!(HOOK_GETLP),
         ));
         results.push(record(
-            try_install(FN_GET_CONN_STRING, 6, "GetConnectionString", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_CONN_STRING, 6, &SDK_PROLOGUE_RBP_R14, "GetConnectionString", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(CONN_NEAR),
             std::ptr::addr_of_mut!(HOOK_CONN),
         ));
         results.push(record(
-            try_install(FN_GET_MEMBER_CONN_STATUS, 6, "GetMemberConnectionStatus", "PlayFabMultiplayerWin.dll", sdk_range, false, 0),
+            try_install(FN_GET_MEMBER_CONN_STATUS, 7, &SDK_PROLOGUE_RBX_R12, "GetMemberConnectionStatus", "PlayFabMultiplayerWin.dll", sdk_range, false, 0, std::ptr::null_mut()),
             std::ptr::addr_of_mut!(MEMCONN_NEAR),
             std::ptr::addr_of_mut!(HOOK_MEMCONN),
         ));
@@ -313,35 +334,38 @@ pub fn install_lobby_hooks(no_join: bool) -> bool {
         match try_install(
             GAME_KICK_CONFIG,
             8,
+            &KICKCFG_PROLOGUE,
             "KICKCFG",
             "granblue_fantasy_relink.exe",
             game_range,
             true,
             gbfr_kick_stub as *const () as usize,
+            std::ptr::addr_of_mut!(gbfr_kick_tramp),
         ) {
             Some(h) => {
                 KICKCFG_NEAR = h.near_addr();
-                gbfr_kick_tramp = h.trampoline() as u64;
                 HOOK_KICKCFG = Box::into_raw(Box::new(h));
                 results.push(true);
             }
             None => results.push(false),
         }
-        // T10: 官方异步入房入口 (far stub, out-param 槽捕获) — 均为 SDK 导出, len=6 (push 序言家族同 B22)
+        // T10: 官方异步入房入口 (far stub, out-param 槽捕获) — 序言均以
+        // 40 53|55|56|57|41 54 开始，最小完整覆盖是 7 字节。
         // T5 诊断: no_join → 不安装这两个 far stub (结果向量少两项, all-or-nothing 只看存在的项)
         if !no_join {
             match try_install(
                 FN_JOIN_LOBBY,
-                6,
+                7,
+                &SDK_PROLOGUE_RBX_R12,
                 "JoinLobby",
                 "PlayFabMultiplayerWin.dll",
                 sdk_range,
                 true,
                 gbfr_join_stub as *const () as usize,
+                std::ptr::addr_of_mut!(gbfr_join_tramp),
             ) {
                 Some(h) => {
                     JOIN_NEAR = h.near_addr();
-                    gbfr_join_tramp = h.trampoline() as u64;
                     HOOK_JOIN = Box::into_raw(Box::new(h));
                     results.push(true);
                 }
@@ -349,16 +373,17 @@ pub fn install_lobby_hooks(no_join: bool) -> bool {
             }
             match try_install(
                 FN_CREATE_JOIN,
-                6,
+                7,
+                &SDK_PROLOGUE_RBX_R12,
                 "CreateAndJoinLobby",
                 "PlayFabMultiplayerWin.dll",
                 sdk_range,
                 true,
                 gbfr_createjoin_stub as *const () as usize,
+                std::ptr::addr_of_mut!(gbfr_createjoin_tramp),
             ) {
                 Some(h) => {
                     CREATEJOIN_NEAR = h.near_addr();
-                    gbfr_createjoin_tramp = h.trampoline() as u64;
                     HOOK_CREATEJOIN = Box::into_raw(Box::new(h));
                     results.push(true);
                 }
@@ -369,25 +394,41 @@ pub fn install_lobby_hooks(no_join: bool) -> bool {
         }
         if !decide_all_or_nothing(&results) {
             // T2: 全量回滚 — 本次调用已装的 hook 全部还原, 静态清零 (clear_hook = T5 幂等清理)
-            clear_hook(std::ptr::addr_of_mut!(HOOK_POST));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_GETID));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_MEMBERS));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_OWNER));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_GETMP));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_GETLP));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_CONN));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_MEMCONN));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_KICKCFG));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_JOIN));
-            clear_hook(std::ptr::addr_of_mut!(HOOK_CREATEJOIN));
-            POST_NEAR = 0; GETID_NEAR = 0; MEMBERS_NEAR = 0;
-            OWNER_NEAR = 0; GETMP_NEAR = 0; GETLP_NEAR = 0; CONN_NEAR = 0; MEMCONN_NEAR = 0;
-            KICKCFG_NEAR = 0; JOIN_NEAR = 0; CREATEJOIN_NEAR = 0;
-            gbfr_kick_tramp = 0;
-            gbfr_join_tramp = 0; gbfr_createjoin_tramp = 0;
-            gbfr_join_out = 0; gbfr_createjoin_out = 0;
-            LOBBY_JOIN = 0;
-            log("[kick] PARTIAL INSTALL ROLLED BACK");
+            let rollback_ok = clear_hook(std::ptr::addr_of_mut!(HOOK_POST))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_GETID))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_MEMBERS))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_OWNER))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_GETMP))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_GETLP))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_CONN))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_MEMCONN))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_KICKCFG))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_JOIN))
+                | clear_hook(std::ptr::addr_of_mut!(HOOK_CREATEJOIN));
+            let all_clear = std::ptr::read(std::ptr::addr_of!(HOOK_POST)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_GETID)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_MEMBERS)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_OWNER)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_GETMP)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_GETLP)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_CONN)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_MEMCONN)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_KICKCFG)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_JOIN)).is_null()
+                && std::ptr::read(std::ptr::addr_of!(HOOK_CREATEJOIN)).is_null();
+            if all_clear {
+                POST_NEAR = 0; GETID_NEAR = 0; MEMBERS_NEAR = 0;
+                OWNER_NEAR = 0; GETMP_NEAR = 0; GETLP_NEAR = 0; CONN_NEAR = 0; MEMCONN_NEAR = 0;
+                KICKCFG_NEAR = 0; JOIN_NEAR = 0; CREATEJOIN_NEAR = 0;
+                gbfr_kick_tramp = 0;
+                gbfr_join_tramp = 0; gbfr_createjoin_tramp = 0;
+                gbfr_join_out = 0; gbfr_createjoin_out = 0;
+                LOBBY_JOIN = 0;
+                log("[kick] PARTIAL INSTALL ROLLED BACK");
+            } else {
+                let _ = rollback_ok;
+                log("[kick] PARTIAL INSTALL rollback FAILED — hook ownership retained");
+            }
             return false;
         }
         log(&format!("[kick] hooks installed ({}: PostUpdate/GetLobbyId/GetMembers/GetOwner/GetMemberProperty/GetLobbyProperty/GetConnectionString/GetMemberConnectionStatus/KICKCFG-rdi-swap/JoinLobby/CreateAndJoinLobby)", results.len()));
@@ -458,7 +499,7 @@ fn poll_decision(slot_addr: u64, slot_value: u64) -> Option<u64> {
     }
 }
 
-// VirtualQuery 提交状态检查 (antikick mem_committed 同模式)
+// VirtualQuery 提交状态检查（轮询槽只在确认已提交后读取；完整可读性审计见 antikick::mem_readable）
 unsafe fn mem_committed(p: usize) -> bool {
     use windows_sys::Win32::System::Memory::{VirtualQuery, MEM_COMMIT, MEMORY_BASIC_INFORMATION};
     let mut mbi = std::mem::zeroed::<MEMORY_BASIC_INFORMATION>();
@@ -781,4 +822,3 @@ mod tests {
             assert!(h.is_null());
         }
     }}
-

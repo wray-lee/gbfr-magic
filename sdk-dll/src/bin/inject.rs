@@ -11,8 +11,15 @@ use windows_sys::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, CreateRemoteThread, PROCESS_ALL_ACCESS,
+    OpenProcess, WaitForSingleObject, CreateRemoteThread, PROCESS_CREATE_THREAD,
+    PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
+
+const INJECT_ACCESS: u32 = PROCESS_CREATE_THREAD
+    | PROCESS_QUERY_INFORMATION
+    | PROCESS_VM_OPERATION
+    | PROCESS_VM_READ
+    | PROCESS_VM_WRITE;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -31,7 +38,10 @@ fn main() {
     };
 
     unsafe {
-        let hproc = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+        // Request only the rights required by VirtualAllocEx/WriteProcessMemory/CRT.
+        // PROCESS_ALL_ACCESS is rejected by some target security descriptors even when
+        // the narrower injection rights are granted.
+        let hproc = OpenProcess(INJECT_ACCESS, 0, pid);
         if hproc.is_null() {
             println!("OpenProcess failed: {}", std::io::Error::last_os_error());
             return;
